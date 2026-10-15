@@ -577,7 +577,67 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
 
     if (agreed == true) {
-      await PermissionService.instance.requestAll();
+      final result = await PermissionService.instance.requestAll();
+      final stillMissing = result.values.any((granted) => !granted);
+      if (stillMissing && mounted) {
+        // 权限未全开：很可能此前拒绝时触发了「不再询问」，
+        // 系统不会再弹窗，只能引导去系统设置手动开启
+        final goSettings = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              backgroundColor: BodhiColors.cardWhite,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: Row(
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    size: 20,
+                    color: BodhiColors.gold,
+                  ),
+                  const SizedBox(width: 8),
+                  Text('部分权限未开启', style: BodhiTypography.pageTitle),
+                ],
+              ),
+              content: Text(
+                '相机 / 相册 / 定位 / 设备识别码中仍有未开启的权限。\n\n'
+                '若您此前拒绝过且选择了「不再询问」，系统将不再弹出申请，'
+                '需要到系统设置中手动开启，否则扫码、相册导入等功能无法使用。',
+                style: BodhiTypography.body.copyWith(
+                  color: BodhiColors.inkGray,
+                  height: 1.7,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: Text(
+                    '暂不',
+                    style: BodhiTypography.rowLabel.copyWith(
+                      color: BodhiColors.inkGray,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: Text(
+                    '去系统设置开启',
+                    style: BodhiTypography.rowLabel.copyWith(
+                      color: BodhiColors.gold,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+        if (goSettings == true && mounted) {
+          await PermissionService.instance.openSettings();
+        }
+      }
     }
   }
 

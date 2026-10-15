@@ -51,6 +51,13 @@ class PermissionService {
     };
   }
 
+  /// 打开本应用的系统设置页（用于权限被「不再询问」后手动开启）
+  Future<void> openSettings() async {
+    try {
+      await openAppSettings();
+    } catch (_) {}
+  }
+
   /// 查询四项权限当前授予状态
   Future<Map<String, bool>> checkAll() async {
     try {
