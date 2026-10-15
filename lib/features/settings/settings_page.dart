@@ -1884,7 +1884,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.2" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.3" : _currentVersion}）')}',
     );
 
     try {
@@ -1921,7 +1921,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.2" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.3" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,
