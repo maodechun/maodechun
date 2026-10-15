@@ -1,12 +1,10 @@
-import 'dart:io';
-
-import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:vibration/vibration.dart';
 
+import '../../core/permissions/permission_service.dart';
 import '../../core/totp/uri_parser.dart';
 import '../../theme/colors.dart';
 import '../../theme/typography.dart';
@@ -805,39 +803,49 @@ class _ScanPageState extends State<ScanPage> {
 
   /// 从相册选择二维码图片，交由原生 zxing 解码
   ///
-  /// 权限：Android 13+ READ_MEDIA_IMAGES，Android 12- READ_EXTERNAL_STORAGE
+  /// 关键：安卓系统选图器（Photo Picker / ACTION_GET_CONTENT）本身
+  /// **不需要任何运行时权限**。此前先申请 READ_MEDIA_IMAGES 的做法在
+  /// 权限被「不再询问」后会静默失败，导致相册导入永远打不开。
+  /// 因此这里改为：直接选图 → 选图器报错才降级申请权限重试 →
+  /// 仍不行引导用户去系统设置手动开启。
   /// ⚠️ 全流程 try-catch：系统相册被拒 / 图片读取失败都不能崩溃
   Future<void> _pickFromGallery() async {
     if (_picking) return;
     _picking = true;
 
     try {
-      // 1. 先申请相册权限（Android 13+ 用 photos，低版本用 storage）
-      final Permission readPermission = Platform.isAndroid
-          ? await _resolveAndroidPhotoPermission()
-          : Permission.photos;
-
-      final status = await readPermission.request();
-      if (!status.isGranted) {
-        _picking = false;
-        _showSnack('未获得相册访问权限，可改用「手动输入密钥」');
-        return;
+      // 1. 直接选取图片（无需任何权限；用户取消返回 null）
+      final picker = ImagePicker();
+      XFile? file;
+      try {
+        file = await picker.pickImage(
+          source: ImageSource.gallery,
+          maxWidth: 2400,
+          maxHeight: 2400,
+        );
+      } catch (_) {
+        // 个别 ROM 选图器异常：降级申请相册权限后重试一次
+        final granted = await PermissionService.instance.requestGallery();
+        if (!mounted) return;
+        if (!granted) {
+          _picking = false;
+          _guideToSettings('相册权限被拒绝，请到系统设置中手动开启');
+          return;
+        }
+        file = await picker.pickImage(
+          source: ImageSource.gallery,
+          maxWidth: 2400,
+          maxHeight: 2400,
+        );
       }
 
-      // 2. 选取图片
-      final picker = ImagePicker();
-      final XFile? file = await picker.pickImage(
-        source: ImageSource.gallery,
-        maxWidth: 2400,
-        maxHeight: 2400,
-      );
       if (file == null) {
         // 用户取消选择，静默返回
         _picking = false;
         return;
       }
 
-      // 3. 原生 zxing 解码（与相机扫码同一解码核心，无 Google 服务依赖）
+      // 2. 原生 zxing 解码（与相机扫码同一解码核心，无 Google 服务依赖）
       final raw = await MethodChannel('bodhi/scan')
           .invokeMethod<String>('decodeFromFile', {'path': file.path});
 
@@ -847,7 +855,7 @@ class _ScanPageState extends State<ScanPage> {
         return;
       }
 
-      // 4. 复用统一的批量解析流程（兼容 Google 迁移二维码多账号）
+      // 3. 复用统一的批量解析流程（兼容 Google 迁移二维码多账号）
       final batch = OtpAuthParser.parseBatch(raw);
       if (!batch.ok) {
         _picking = false;
@@ -855,7 +863,7 @@ class _ScanPageState extends State<ScanPage> {
         return;
       }
 
-      // 5. 震动反馈后绑定
+      // 4. 震动反馈后绑定
       _picking = false;
       if (!mounted) return;
       await _deliverBatch(batch, keepScanning: false);
@@ -866,16 +874,54 @@ class _ScanPageState extends State<ScanPage> {
     }
   }
 
-  /// Android 相册权限：13+ 为 photos（READ_MEDIA_IMAGES），以下为 storage
-  Future<Permission> _resolveAndroidPhotoPermission() async {
-    try {
-      // Android 13 (API 33) 及以上使用分媒体权限
-      final sdkInt = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
-      return sdkInt >= 33 ? Permission.photos : Permission.storage;
-    } catch (_) {
-      // 版本读取失败时退回 photos（在低版本上 permission_handler 会自动映射）
-      return Permission.photos;
-    }
+  /// 权限被拒后的引导：提示 + 提供「去系统设置」按钮
+  void _guideToSettings(String message) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: BodhiColors.cardWhite,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: Text('需要相册权限', style: BodhiTypography.pageTitle),
+          content: Text(
+            '$message。\n\n'
+            '路径：系统设置 → 应用 → 菩提护令 → 权限 → '
+            '允许访问照片和视频。',
+            style: BodhiTypography.body.copyWith(
+              color: BodhiColors.inkGray,
+              height: 1.7,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: Text(
+                '取消',
+                style: BodhiTypography.rowLabel.copyWith(
+                  color: BodhiColors.inkGray,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                PermissionService.instance.openSettings();
+              },
+              child: Text(
+                '去系统设置',
+                style: BodhiTypography.rowLabel.copyWith(
+                  color: BodhiColors.gold,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _toggleTorch() async {

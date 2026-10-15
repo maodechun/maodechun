@@ -145,6 +145,8 @@ class _SettingsPageState extends State<SettingsPage> {
                       padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
                       child: Column(
                         children: [
+                          _buildCloudSection(),
+                          const SizedBox(height: 8),
                           _buildSecuritySection(),
                           const SizedBox(height: 8),
                           _buildBackupSection(),
@@ -171,6 +173,43 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ),
+    );
+  }
+
+  // ── 分组 0 · 云备份与恢复（七牛云，手机号即身份） ─────
+
+  Widget _buildCloudSection() {
+    return SectionCard(
+      title: '云备份与恢复',
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+      children: [
+        const TipBar(
+          text: '换手机、误删都不怕：输入手机号即可把全部令牌加密备份到云端，'
+              '恢复时输入同一手机号即可找回。无需密码与验证码。',
+        ),
+        const SizedBox(height: 6),
+        SettingRow(
+          label: '云备份',
+          hint: '输入手机号，一键加密备份全部令牌',
+          trailing: const Icon(
+            Icons.cloud_upload_outlined,
+            size: 18,
+            color: BodhiColors.gold,
+          ),
+          onTap: _cloudBackupFlow,
+        ),
+        SettingRow(
+          label: '云恢复',
+          hint: '输入备份时的手机号，找回云端全部令牌',
+          showDivider: false,
+          trailing: const Icon(
+            Icons.cloud_download_outlined,
+            size: 18,
+            color: BodhiColors.gold,
+          ),
+          onTap: _cloudRestoreFlow,
+        ),
+      ],
     );
   }
 
@@ -731,31 +770,15 @@ class _SettingsPageState extends State<SettingsPage> {
 
         const SizedBox(height: 4),
         SettingRow(
-          label: '云端备份（免密）',
-          hint: '输入手机号即完成备份，自动持续同步',
+          label: '云端备份 / 恢复',
+          hint: '已移至设置页顶部「云备份与恢复」分组',
           showDivider: false,
-          height: 36,
-        ),
-        SettingRow(
-          label: '备份到云端',
-          hint: '首次需输入手机号，之后自动备份，无需密码验证码',
-          trailing: const Icon(
-            Icons.cloud_upload_outlined,
-            size: 18,
-            color: BodhiColors.gold,
-          ),
-          onTap: _cloudBackupFlow,
-        ),
-        SettingRow(
-          label: '从云端恢复',
-          hint: '输入手机号即可找回云端的全部令牌',
-          height: 44,
           trailing: const Icon(
             Icons.chevron_right,
             size: 18,
             color: BodhiColors.inkFaint,
           ),
-          onTap: _cloudRestoreFlow,
+          onTap: _cloudBackupFlow,
         ),
       ],
     );
@@ -1202,10 +1225,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // ── 分组 2.5 · 云端备份（七牛云，手机号即身份） ───────
 
-  /// 备份到云端：首次输入手机号 → 自动备份；已有手机号直接备份
+  /// 备份到云端：每次都要求输入手机号（预填上次绑定的号码）→ 加密备份
   Future<void> _cloudBackupFlow() async {
-    final phone = await QiniuBackupService.instance.getPhone();
-    final input = phone ?? await _askCloudPhone(title: '绑定备份手机号');
+    final saved = await QiniuBackupService.instance.getPhone();
+    final input = await _askCloudPhone(title: '云备份 · 输入手机号', initial: saved);
     if (input == null || !mounted) return;
 
     _showLoading('正在加密并上传到云端…');
