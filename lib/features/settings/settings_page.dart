@@ -12,6 +12,7 @@ import '../../data/repository/token_repository.dart';
 import '../../data/services/cache_service.dart';
 import '../../data/services/ftp_backup_service.dart';
 import '../../data/services/local_backup_service.dart';
+import '../../data/services/qiniu_backup_service.dart';
 import '../../data/services/update_service.dart';
 import '../../theme/colors.dart';
 import '../../theme/typography.dart';
@@ -727,6 +728,35 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           onTap: _restoreFlow,
         ),
+
+        const SizedBox(height: 4),
+        SettingRow(
+          label: '云端备份（免密）',
+          hint: '输入手机号即完成备份，自动持续同步',
+          showDivider: false,
+          height: 36,
+        ),
+        SettingRow(
+          label: '备份到云端',
+          hint: '首次需输入手机号，之后自动备份，无需密码验证码',
+          trailing: const Icon(
+            Icons.cloud_upload_outlined,
+            size: 18,
+            color: BodhiColors.gold,
+          ),
+          onTap: _cloudBackupFlow,
+        ),
+        SettingRow(
+          label: '从云端恢复',
+          hint: '输入手机号即可找回云端的全部令牌',
+          height: 44,
+          trailing: const Icon(
+            Icons.chevron_right,
+            size: 18,
+            color: BodhiColors.inkFaint,
+          ),
+          onTap: _cloudRestoreFlow,
+        ),
       ],
     );
   }
@@ -1168,6 +1198,105 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     controller.dispose();
     return (result == null || result.isEmpty) ? null : result;
+  }
+
+  // ── 分组 2.5 · 云端备份（七牛云，手机号即身份） ───────
+
+  /// 备份到云端：首次输入手机号 → 自动备份；已有手机号直接备份
+  Future<void> _cloudBackupFlow() async {
+    final phone = await QiniuBackupService.instance.getPhone();
+    final input = phone ?? await _askCloudPhone(title: '绑定备份手机号');
+    if (input == null || !mounted) return;
+
+    _showLoading('正在加密并上传到云端…');
+    final result = await QiniuBackupService.instance.backup(input);
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+    _showSnack(result.message);
+  }
+
+  /// 从云端恢复：输入手机号 → 下载最新备份并导入
+  Future<void> _cloudRestoreFlow() =>
+      AutoLockGuard.run(() => _cloudRestoreFlowImpl());
+
+  Future<void> _cloudRestoreFlowImpl() async {
+    final saved = await QiniuBackupService.instance.getPhone();
+    final input = await _askCloudPhone(
+      title: '从云端恢复',
+      initial: saved,
+    );
+    if (input == null || !mounted) return;
+
+    _showLoading('正在从云端下载并恢复…');
+    final result =
+        await QiniuBackupService.instance.restore(input, merge: true);
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+    _showSnack(result.message);
+  }
+
+  /// 询问手机号弹窗（11 位大陆手机号，无需验证码）
+  Future<String?> _askCloudPhone({
+    required String title,
+    String? initial,
+  }) {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        var error = '';
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            backgroundColor: BodhiColors.paperLight,
+            title: Text(title, style: BodhiTypography.pageTitle),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '手机号仅用于区分不同用户的备份，'
+                  '不需要验证码与密码，请确保号码真实有效。',
+                  style: BodhiTypography.caption,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  keyboardType: TextInputType.phone,
+                  maxLength: 11,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: InputDecoration(
+                    hintText: '请输入 11 位手机号',
+                    counterText: '',
+                    errorText: error.isEmpty ? null : error,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () {
+                  final v = controller.text.trim();
+                  if (!QiniuBackupService.isValidPhone(v)) {
+                    setDialogState(() => error = '手机号格式不正确');
+                    return;
+                  }
+                  Navigator.of(dialogContext).pop(v);
+                },
+                child: const Text('确定'),
+              ),
+            ],
+          ),
+        );
+      },
+    ).then((value) {
+      controller.dispose();
+      return value;
+    });
   }
 
   // ── 分组 3 · 在线更新与浏览 ──────────────────────────

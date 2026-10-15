@@ -15,6 +15,7 @@ import 'core/system_bridge.dart';
 import 'core/time/ntp_client.dart';
 import 'data/models/token.dart';
 import 'data/repository/token_repository.dart';
+import 'data/services/qiniu_backup_service.dart';
 import 'data/services/update_service.dart';
 import 'features/browser/browser_page.dart';
 import 'features/export/export_page.dart';
@@ -894,6 +895,10 @@ class _MainNavigatorState extends State<_MainNavigator> {
         // 最后一张（或单张）导入完成：回到令牌列表并汇总结果
         setState(() => _route = _MainRoute.tokens);
         _toast(parts.isNotEmpty ? parts.join('，') : (lastError ?? '绑定失败'));
+        // 绑定成功后触发云端静默备份（已绑定手机号时生效，失败不打扰）
+        if (added > 0) {
+          QiniuBackupService.instance.autoBackup();
+        }
       },
     );
   }
