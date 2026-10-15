@@ -1856,9 +1856,10 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         SettingRow(
           label: '服务电话',
+          hint: '点击直接拨打',
           height: 46,
           trailing: Text(
-            '133307459931',
+            '13307459931',
             style: BodhiTypography.rowValue,
           ),
           onTap: _callPhone,
@@ -1887,13 +1888,9 @@ class _SettingsPageState extends State<SettingsPage> {
     );
 
     try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-      } else {
-        // 降级：无邮件客户端时复制邮箱并提示
-        await Clipboard.setData(const ClipboardData(text: email));
-        _showSnack('未检测到邮件客户端，邮箱已复制：$email');
-      }
+      // 不依赖 canLaunchUrl（Android 11+ 包可见性限制可能误判），
+      // 直接以外部应用模式拉起邮件客户端，失败才降级复制
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     } catch (_) {
       await Clipboard.setData(const ClipboardData(text: email));
       _showSnack('无法打开邮件客户端，邮箱已复制：$email');
@@ -1902,15 +1899,18 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 调起拨号盘
   Future<void> _callPhone() async {
-    const phone = '133307459931';
+    const phone = '13307459931';
     final uri = Uri(scheme: 'tel', path: phone);
     try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-      } else {
-        await Clipboard.setData(const ClipboardData(text: phone));
-        _showSnack('无法拨号，号码已复制：$phone');
+      var ok = false;
+      try {
+        ok = await canLaunchUrl(uri);
+      } catch (_) {
+        ok = false;
       }
+      // Android 11+ 包可见性限制可能导致 canLaunchUrl 误判 false，
+      // 拨号 ACTION_DIAL 无需权限，直接尝试拉起兜底
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     } catch (_) {
       await Clipboard.setData(const ClipboardData(text: phone));
       _showSnack('无法拨号，号码已复制：$phone');

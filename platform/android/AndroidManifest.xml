@@ -9,6 +9,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- ══════════════════════════════════════════════════
+         包可见性声明（Android 11+ 必须）
+         缺少此段时 canLaunchUrl 对 tel:/mailto: 恒为 false，
+         关于页「拨打电话 / 发邮件」会失效
+         ══════════════════════════════════════════════════ -->
+    <queries>
+        <!-- 拨号盘 -->
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+            <data android:scheme="tel" />
+        </intent>
+        <!-- 邮件客户端 -->
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+    </queries>
+
+    <!-- ══════════════════════════════════════════════════
          权限声明
          申请时机说明见《01-开发实现文档》第七章
          ══════════════════════════════════════════════════ -->
