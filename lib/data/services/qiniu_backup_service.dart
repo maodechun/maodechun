@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/security/secret_store.dart';
@@ -16,15 +15,13 @@ import '../repository/token_repository.dart';
 ///   - 存储路径：bodhi/cloud/<手机号>.btk，同手机号覆盖上传（保留最新一份）
 ///   - 换手机：输入同一手机号即可从云端恢复
 ///
-/// 上传采用七牛表单直传协议：HMAC-SHA1 生成上传凭证，
+/// 上传凭证由服务端代签（https://www.852233.com.cn/qiniu/sign.php），
+/// 客户端不保存任何 AK/SK；拿到凭证后表单直传七牛，
 /// 依次尝试各区域上传域名直到成功。
 class QiniuBackupService {
   QiniuBackupService._internal();
   static final QiniuBackupService instance = QiniuBackupService._internal();
 
-  static const String _ak = 'bbYzMuFo9HkoUuThgDD9T9E2xys5LmO5Ko96u2Nu';
-  static const String _sk = 'VUIf3lhJOFYF2W3N-KVXRVllLwsVQnULPeGrfuE6';
-  static const String _bucket = 'shakya';
   static const String _downloadDomain = 'apk.0499.com.cn';
 
   /// 各区域上传域名（实测 shakya 空间位于华南 z2，放首位）
@@ -66,25 +63,44 @@ class QiniuBackupService {
     } catch (_) {}
   }
 
-  /// 云端备份 key
+  /// 备份 key
   static String _objectKey(String phone) => 'bodhi/cloud/$phone.btk';
 
-  /// 生成七牛上传凭证（HMAC-SHA1 签名）
-  static String _uploadToken(String key) {
-    final deadline = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600;
-    final policy =
-        jsonEncode({'scope': '$_bucket:$key', 'deadline': deadline});
-    // 注意：七牛的 urlsafe base64 保留 '=' 填充，不能去掉
-    final encPolicy = base64Url.encode(utf8.encode(policy));
-    final sign = _urlSafeB64(
-      Hmac(sha1, utf8.encode(_sk)).convert(encPolicy.codeUnits).bytes,
-    );
-    return '$_ak:$sign:$encPolicy';
-  }
+  /// 代签服务器（SK 只保存在服务端，客户端不含任何密钥）
+  static const String _signUrl = 'https://www.852233.com.cn/qiniu/sign.php';
+  static const String _appSecret = 'bodhi-cloud-v1';
 
-  /// 七牛规范：urlsafe base64（签名结果保留 '=' 填充）
-  static String _urlSafeB64(List<int> bytes) {
-    return base64Url.encode(bytes);
+  /// 向代签服务器取上传凭证；服务器不可达/异常时返回 null
+  static Future<String?> _resolveUploadToken(String phone, String key) async {
+    try {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 10);
+      final req = await client.postUrl(Uri.parse(_signUrl));
+      req.headers.contentType = ContentType(
+        'application',
+        'x-www-form-urlencoded',
+        charset: 'utf-8',
+      );
+      final body = 'phone=$phone&secret=$_appSecret';
+      req.headers.contentLength = utf8.encode(body).length;
+      req.add(utf8.encode(body));
+      final resp = await req.close();
+      final text = await resp.transform(utf8.decoder).join();
+      client.close();
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(text);
+        if (data is Map &&
+            data['code'] == 0 &&
+            data['key'] == key &&
+            data['uploadToken'] is String &&
+            (data['uploadToken'] as String).isNotEmpty) {
+          return data['uploadToken'] as String;
+        }
+      }
+    } catch (_) {
+      // 服务器不可达
+    }
+    return null;
   }
 
   /// 备份到云端
@@ -124,7 +140,14 @@ class QiniuBackupService {
     // 以手机号派生密钥加密（与本地备份同一加密体系）
     final encrypted = SecretStore.encryptWithPassword(payload, phone);
     final key = _objectKey(phone);
-    final token = _uploadToken(key);
+    // 向代签服务器取上传凭证（客户端不含任何密钥）
+    final token = await _resolveUploadToken(phone, key);
+    if (token == null) {
+      return const QiniuBackupResult(
+        success: false,
+        message: '备份失败：备份服务暂时不可用，请检查网络后重试',
+      );
+    }
 
     try {
       await _upload(key, token, utf8.encode(encrypted));
