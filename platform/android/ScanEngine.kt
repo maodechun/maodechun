@@ -8,6 +8,8 @@ import android.graphics.Matrix
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -70,6 +72,19 @@ class ScanPlatformView(
     }
 
     private val previewView = PreviewView(context)
+
+    /// 平台视图根容器：PreviewView 必须以 MATCH_PARENT 塞进容器，
+    /// 否则 attached 后拿到的是裸 View 的默认尺寸，预览会顶在左上角
+    private val container = FrameLayout(context).apply {
+        clipChildren = true
+        addView(
+            previewView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+    }
     private val channel = MethodChannel(messenger, "bodhi/scan_view_$viewId")
     private val mainHandler = Handler(Looper.getMainLooper())
     private val analyzerExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -252,7 +267,7 @@ class ScanPlatformView(
 
     // ── 生命周期 ─────────────────────────────────────────
 
-    override fun getView(): android.view.View = previewView
+    override fun getView(): android.view.View = container
 
     override fun dispose() {
         disposed = true

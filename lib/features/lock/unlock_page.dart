@@ -330,7 +330,10 @@ class _UnlockPageState extends State<UnlockPage> {
       final ok = await _localAuth.authenticate(
         localizedReason: '解锁菩提护令以查看您的动态令牌',
         options: const AuthenticationOptions(
-          biometricOnly: false,
+          // 只走指纹/人脸，不要求系统锁屏凭据：
+          // 用户用的是本 App 自己的密码，若设备未设系统锁屏，
+          // biometricOnly=false 时部分机型会直接抛错导致"设备不支持"
+          biometricOnly: true,
           stickyAuth: true,
           useErrorDialogs: false,
         ),
@@ -351,13 +354,38 @@ class _UnlockPageState extends State<UnlockPage> {
               : '识别未通过，请重试';
         });
       }
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _checking = false;
+        _errorMessage = _biometricErrorHint(e);
+      });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _checking = false;
-        _hasBiometric = false;
-        _errorMessage = '当前设备暂不支持生物识别，请使用密码解锁';
+        _errorMessage = '生物识别启动失败，请使用密码解锁';
       });
+    }
+  }
+
+  /// 把 local_auth 错误码翻译成用户能懂、能自救的提示
+  String _biometricErrorHint(PlatformException e) {
+    switch (e.code) {
+      case 'no_hardware':
+        return '未检测到指纹/人脸硬件，请使用密码解锁';
+      case 'none_enrolled':
+        return '尚未录入指纹/人脸，请到手机「设置 → 密码与安全」录入后，回到本页点击指纹按钮重试';
+      case 'no_device_credential':
+      case 'device_credential_required':
+        return '请先在手机系统设置里设置一次锁屏密码，之后指纹/人脸即可使用';
+      case 'locked_out':
+      case 'permanently_locked_out':
+        return '生物识别已被系统临时锁定，请用密码解锁后稍后再试';
+      case 'no_fragment_activity':
+        return '生物识别组件初始化异常，请退出应用重新打开再试';
+      default:
+        return '生物识别暂不可用（${e.code}），请使用密码解锁';
     }
   }
 
