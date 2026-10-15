@@ -130,6 +130,24 @@ jobs:
              android/app/src/main/kotlin/com/daotuo/bodhi_token/MainActivity.kt
           echo "✅ MainActivity 已替换为 FlutterFragmentActivity"
 
+          # 原生扫码引擎（CameraX 预览 + zxing 解码）
+          # 扫码页 AndroidView 'bodhi/scan_view' 与相册解码通道
+          # 'bodhi/scan' 都在 ScanEngine.kt 中实现，缺失时
+          # 表现为相机一直黑屏「启动中」、相册导入无反应。
+          cp platform/android/ScanEngine.kt \
+             android/app/src/main/kotlin/com/daotuo/bodhi_token/ScanEngine.kt
+          if ! grep -q zxing android/app/build.gradle.kts; then
+            cat platform/android/scan-deps.txt >> android/app/build.gradle.kts
+          fi
+          echo "✅ 原生扫码引擎与依赖已注入"
+
+          # 莲花应用图标（flutter create 会生成默认图标，需覆盖）
+          for d in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            mkdir -p "android/app/src/main/res/$d"
+            cp platform/android/icons/$d/*.png "android/app/src/main/res/$d/"
+          done
+          echo "✅ 应用图标已覆盖为莲花图"
+
       # ── 6. 恢复签名密钥（若配置了 Secrets）─────────────
       - name: 恢复签名密钥
         id: keystore

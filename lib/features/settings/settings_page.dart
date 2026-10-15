@@ -1839,6 +1839,18 @@ class _SettingsPageState extends State<SettingsPage> {
       title: '关于与版权',
       children: [
         SettingRow(
+          label: '当前版本',
+          hint: '每次更新都会递增，便于区分新旧安装包',
+          height: 46,
+          trailing: Text(
+            _currentVersion.isEmpty ? 'v5.3.4' : _currentVersion,
+            style: BodhiTypography.rowValue.copyWith(
+              color: BodhiColors.gold,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        SettingRow(
           label: '联系我们',
           height: 46,
           trailing: Text(
@@ -1884,7 +1896,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.3" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.4" : _currentVersion}）')}',
     );
 
     try {
@@ -1921,7 +1933,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.3" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.4" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,
