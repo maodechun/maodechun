@@ -1,0 +1,143 @@
+name: bodhi_token
+description: 菩提护令 - 古色古香的离线动态令牌（TOTP）工具
+publish_to: 'none'
+version: 5.3.2+532
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+  flutter: '>=3.16.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 时间与格式化
+  intl: ^0.20.2
+
+  # 状态管理（轻量，不引重量级框架）
+  provider: ^6.1.1
+
+  # 安全存储：密钥加密后落盘（Android Keystore / iOS Keychain 支持）
+  flutter_secure_storage: ^9.0.0
+
+  # 生物识别（指纹 / Face ID / 3D 人脸）
+  local_auth: ^2.1.8
+
+  # 二维码扫描：原生实现（MainActivity 壳内 CameraX + zxing 解码，
+  # 见 android 壳 ScanEngine.kt）。
+  # ⚠️ 不使用 mobile_scanner：其 ML Kit 引擎在无 Google 服务的国产手机上
+  #    必报 "Internal error when executing ML Kit tasks"（thick/本地模式也失败），
+  #    已从依赖移除；zxing 纯 Java 无任何 GMS/native 依赖，全设备可用。
+  # 权限申请
+  permission_handler: ^11.1.0
+  # 从相册选取二维码图片（扫码失败时可识图导入）
+  image_picker: ^1.0.7
+
+  # 本地数据库（加密 SQLite）
+  # 锁定 2.3.3：2.4.x 用了 Build.VERSION_CODES.BAKLAVA(API 36) + Thread.threadId()(Java 19)，
+  # 本机 android-34 平台 + 手工 javac 无法编译。
+  sqflite: 2.3.3
+  # 锁定 3.0.0：3.4.1 用了 Android 16 (API 36) 的 Build.VERSION_CODES.BAKLAVA
+  # 与 Java 19 的 Thread.threadId()，本机 android-34 平台 + 手工 javac 无法编译。
+  sqflite_sqlcipher: 3.0.0
+
+  # 路径
+  # 锁定 2.1.6：2.3.x 改为纯 Dart 实现（依赖 jni 注入），与手工编译链不兼容
+  path_provider: 2.1.6
+  path: ^1.9.0
+
+  # 网络：FTP 备份 / 版本检测
+  # 注：ftpconnect 官方最高版本为 2.0.10，原写 ^2.1.7 为不存在的版本号，
+  #     会导致依赖解析失败，此处修正。
+  ftpconnect: ^2.0.10
+  http: ^1.1.2
+  dio: ^5.4.0
+
+  # 内置浏览器
+  # 锁定 4.4.2：4.7+ 的 webview_flutter_android 用 Pigeon 生成 Kotlin/Java 混合代码，
+  # 存在 Kotlin↔Java 双向引用，手工编译无法解开（Gradle 联合编译才能处理）。
+  webview_flutter: 4.4.2
+
+  # 二维码生成与展示
+  qr_flutter: ^4.1.0
+
+  # 图片保存到相册
+  image_gallery_saver: ^2.0.3
+
+  # 打开外部应用（邮件 / 电话）
+  url_launcher: ^6.2.2
+
+  # 应用内更新（Android APK 安装）
+  open_filex: ^4.3.4
+
+  # NTP 校时
+  ntp: ^2.0.0
+
+  # 开屏语音播放
+  audioplayers: ^5.2.1
+
+  # 震动反馈
+  vibration: ^1.8.4
+
+  # 时间格式化（TOTP 剩余秒数等）
+  # intl 已在依赖区上方声明，此处不再重复
+
+  # 设备信息（设备识别码绑定校验）
+  device_info_plus: ^9.1.1
+
+  # 版本信息
+  package_info_plus: ^5.0.1
+  # ⚠️ package_info_plus 5.0.1 的 Windows/平台接口实现，
+  #    pub 重解析时传递依赖偶发缺失，显式声明兜底
+  package_info_plus_platform_interface: 2.0.1
+
+  # 分享（备份文件等）
+  share_plus: ^7.2.1
+
+  # UUID 生成
+  uuid: ^4.2.2
+
+  # 加密
+  encrypt: ^5.0.3
+  pointycastle: ^3.7.3
+
+  # 哈希与 HMAC（TOTP 算法核心、PBKDF2 派生、更新包 MD5 校验）
+  crypto: ^3.0.3
+
+  # 本地偏好设置（安全开关、防暴力破解计数、语音开关、隐私同意标记）
+  shared_preferences: ^2.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+# 强制钉死 android 实现：path_provider 2.1.6 的 ^2.0 约束会解析到
+# 2.3.1（纯 Dart + libdartjni.so），真机上加载失败。必须 2.2.10 原生实现。
+dependency_overrides:
+  path_provider_android: 2.2.10
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/audio/
+  # ─────────────────────────────────────────────────────
+  # 字体：思源宋体（SourceHanSerif）
+  #
+  # ⚠️ 字体文件体积较大（每字重约 16MB），未随源码分发。
+  #    如需启用古雅衬线字体，请自行下载后放入 assets/fonts/：
+  #    https://github.com/adobe-fonts/source-han-serif/releases
+  #
+  #    未放入字体文件时，App 会自动回退到系统字体，
+  #    **不影响编译与运行**。放入后取消下方注释即可启用。
+  # ─────────────────────────────────────────────────────
+  # fonts:
+  #   - family: SourceHanSerif
+  #     fonts:
+  #       - asset: assets/fonts/SourceHanSerifSC-Regular.otf
+  #         weight: 400
+  #       - asset: assets/fonts/SourceHanSerifSC-Medium.otf
+  #         weight: 500
+  #       - asset: assets/fonts/SourceHanSerifSC-Bold.otf
+  #         weight: 700

@@ -1,0 +1,283 @@
+# ═══════════════════════════════════════════════════════════════════
+#  菩提护令 · 安卓安装包自动构建
+# ═══════════════════════════════════════════════════════════════════
+#
+#  用途：把代码推到 GitHub 后由云端自动编译出 APK / AAB，无需本地装环境。
+#
+#  ── 怎么用（三步）────────────────────────────────────────────────
+#   1. 把 bodhi_token/ 推到 GitHub 仓库
+#   2. 仓库页面点「Actions」→ 左侧「构建安卓安装包」→「Run workflow」
+#   3. 等 5~10 分钟，在运行详情页底部 Artifacts 下载「菩提护令-安卓包」
+#
+#  ── 签名配置（可选）──────────────────────────────────────────────
+#   未配置也能出包，但产物是「未签名 APK」，安卓不允许安装。
+#   想装到手机上试用，请配置以下 4 个 Secrets
+#   （仓库 Settings → Secrets and variables → Actions → New repository secret）：
+#
+#     ANDROID_KEYSTORE_BASE64     keystore 文件的 base64 字符串
+#     ANDROID_KEYSTORE_PASSWORD   keystore 密码（storePassword）
+#     ANDROID_KEY_ALIAS           key 别名（如 bodhi）
+#     ANDROID_KEY_PASSWORD        key 密码（keyPassword）
+#
+#   生成 keystore：
+#     keytool -genkey -v -keystore bodhi.jks -keyalg RSA -keysize 2048 \
+#             -validity 10000 -alias bodhi
+#
+#   keystore 转 base64：
+#     macOS/Linux:  base64 -i bodhi.jks | tr -d '\n'
+#     Windows(PowerShell):
+#         [Convert]::ToBase64String([IO.File]::ReadAllBytes("bodhi.jks"))
+#
+# ═══════════════════════════════════════════════════════════════════
+
+name: 构建安卓安装包
+
+on:
+  # 手动触发（日常用这个）
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - apk     # 仅 APK（可直接安装分发）
+          - aab     # 仅 AAB（上架商店用）
+          - both    # 两者都出
+
+  # 打 tag 时自动构建并创建 Release（git tag v2.0.3 && git push --tags）
+  push:
+    tags:
+      - 'v*'
+
+# 同一分支只跑最新一次，避免排队
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_VERSION: '2.0.3'
+  APP_NAME: '菩提护令'
+  # pub 镜像：国内 runner 拉包更快更稳（GitHub 官方 runner 亦可正常使用）
+  PUB_HOSTED_URL: 'https://pub.flutter-io.cn'
+  FLUTTER_STORAGE_BASE_URL: 'https://storage.flutter-io.cn'
+
+jobs:
+  build-android:
+    name: 编译 Android 包
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # ── 1. 拉取代码 ────────────────────────────────────
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ── 2. 安装 JDK 17（Flutter 3.16+ 与 Gradle 8 都要求 17）──
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # ── 3. 安装 Flutter SDK ────────────────────────────
+      # 版本与本地已验证通过的构建环境保持一致（3.47.7 / Dart 3.13.x）
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.47.7'
+          cache: true
+
+      # ── 4. 生成 Android 原生工程壳 ─────────────────────
+      # 本仓库只提供 lib/ 纯 Dart 源码，android/ 原生壳由 Flutter 生成，
+      # 随后用仓库内 platform/android/ 的自定义配置覆盖。
+      - name: 生成 Android 工程壳
+        run: |
+          flutter create \
+            --platforms=android \
+            --org com.daotuo \
+            --project-name bodhi_token \
+            --overwrite \
+            .
+
+      # ── 5. 覆盖自定义原生配置 ──────────────────────────
+      - name: 应用自定义 AndroidManifest
+        run: |
+          set -e
+          if [ -f platform/android/AndroidManifest.xml ]; then
+            cp platform/android/AndroidManifest.xml \
+               android/app/src/main/AndroidManifest.xml
+            echo "✅ AndroidManifest.xml 已覆盖"
+          else
+            echo "⚠️ 未找到自定义 AndroidManifest，使用 Flutter 默认配置"
+          fi
+
+          if [ -f platform/android/network_security_config.xml ]; then
+            mkdir -p android/app/src/main/res/xml
+            cp platform/android/network_security_config.xml \
+               android/app/src/main/res/xml/network_security_config.xml
+            echo "✅ network_security_config.xml 已覆盖"
+          fi
+
+      # ── 6. 恢复签名密钥（若配置了 Secrets）─────────────
+      - name: 恢复签名密钥
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "⚠️ 未配置签名 Secrets → 将产出未签名包（无法直接安装）"
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 清洗 base64：去掉所有空白字符。
+          # macOS 的 `base64 -i file` 默认每 76 字符换行，直接粘贴会导致解码失败。
+          CLEAN_B64=$(printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]')
+
+          if ! printf '%s' "$CLEAN_B64" | base64 -d > android/app/bodhi.jks 2>/dev/null; then
+            echo "❌ keystore 解码失败，请确认 ANDROID_KEYSTORE_BASE64 是有效的 base64"
+            exit 1
+          fi
+
+          if [ ! -s android/app/bodhi.jks ]; then
+            echo "❌ keystore 文件为空"
+            exit 1
+          fi
+          echo "✅ keystore 已解码（$(wc -c < android/app/bodhi.jks) 字节）"
+
+          # key.properties 写在 android/ 根目录，
+          # build.gradle 用 rootProject.file('key.properties') 读取。
+          # ⚠️ 用带引号的 heredoc 并自行展开变量，避免缩进污染。
+          {
+            echo "storeFile=bodhi.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > android/key.properties
+
+          echo "has_key=true" >> "$GITHUB_OUTPUT"
+          echo "✅ 签名配置已就绪"
+
+      # ── 7. 注入签名配置到 Gradle 脚本 ──────────────────
+      # 使用仓库内 ci/inject_signing.py（支持 Groovy 与 Kotlin DSL）
+      - name: 配置 Gradle 签名
+        if: steps.keystore.outputs.has_key == 'true'
+        run: |
+          set -e
+          if [ -f android/app/build.gradle.kts ]; then
+            python3 ci/inject_signing.py android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            python3 ci/inject_signing.py android/app/build.gradle
+          else
+            echo "❌ 未找到 build.gradle / build.gradle.kts"; exit 1
+          fi
+
+      # ── 8. 拉取依赖 ────────────────────────────────────
+      - name: 拉取依赖
+        run: |
+          flutter --version
+          flutter pub get
+
+      # ── 8b. 依赖对齐自检 ───────────────────────────────
+      # 防止出现「代码 import 了未在 pubspec 声明的包」这类
+      # 会让 pub get / 编译直接失败的隐蔽问题
+      - name: 依赖对齐自检
+        run: python3 ci/check_deps.py
+
+      # ── 9. 静态分析（仅提示，不阻断构建）───────────────
+      - name: 代码静态分析
+        continue-on-error: true
+        run: flutter analyze
+
+      # ── 10. 构建 APK ───────────────────────────────────
+      - name: 构建 APK
+        if: |
+          github.event_name == 'push' ||
+          inputs.build_type == 'apk' ||
+          inputs.build_type == 'both'
+        run: flutter build apk --release --no-shrink
+
+      - name: 整理 APK 产物
+        if: |
+          github.event_name == 'push' ||
+          inputs.build_type == 'apk' ||
+          inputs.build_type == 'both'
+        run: |
+          set -e
+          mkdir -p dist
+          SRC=build/app/outputs/flutter-apk/app-release.apk
+          if [ ! -f "$SRC" ]; then echo "❌ 未生成 APK"; exit 1; fi
+          cp "$SRC" "dist/${APP_NAME}-v${APP_VERSION}-release.apk"
+          ls -lh dist/
+
+      # ── 11. 构建 AAB（上架商店用）──────────────────────
+      - name: 构建 AAB
+        if: |
+          inputs.build_type == 'aab' ||
+          inputs.build_type == 'both'
+        run: flutter build appbundle --release
+
+      - name: 整理 AAB 产物
+        if: |
+          inputs.build_type == 'aab' ||
+          inputs.build_type == 'both'
+        run: |
+          set -e
+          mkdir -p dist
+          SRC=build/app/outputs/bundle/release/app-release.aab
+          if [ ! -f "$SRC" ]; then echo "❌ 未生成 AAB"; exit 1; fi
+          cp "$SRC" "dist/${APP_NAME}-v${APP_VERSION}-release.aab"
+          ls -lh dist/
+
+      # ── 12. 校验签名结果 ───────────────────────────────
+      - name: 校验 APK 签名
+        if: steps.keystore.outputs.has_key == 'true'
+        run: |
+          APK=dist/${APP_NAME}-v${APP_VERSION}-release.apk
+          [ -f "$APK" ] || { echo "跳过（未构建 APK）"; exit 0; }
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose "$APK" || echo "⚠️ 签名校验未通过"
+          fi
+
+      # ── 13. 上传产物 ───────────────────────────────────
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: 菩提护令-安卓包-v${{ env.APP_VERSION }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
+
+      # ── 14. 打 tag 时创建 Release ──────────────────────
+      - name: 创建 Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 菩提护令 v${{ env.APP_VERSION }}
+          body: |
+            ## 菩提护令 v2.0.3
+
+            古色古香的离线动态令牌（TOTP）工具。
+
+            ### 安装说明
+            - 下载 `.apk` 后在安卓手机上点击安装
+            - 首次安装需在系统设置中允许「安装未知来源应用」
+            - 若提示签名不一致，请先卸载旧版本再安装
+
+            ### 本次更新
+            - 修复扫码页未申请相机权限导致的闪退
+            - 新增相册二维码图片识别导入
+            - 完善权限引导与合规隐私说明
+          files: dist/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

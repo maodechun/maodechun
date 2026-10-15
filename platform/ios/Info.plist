@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  菩提护令 · iOS Info.plist 权限声明片段
+
+  使用方法：
+  将以下 key-value 合并到 `ios/Runner/Info.plist` 的顶层 <dict> 中。
+
+  ⚠️ 权限文案会直接展示在系统弹窗中，必须真实、具体、说明用途。
+     Apple 审核会逐条核对，虚假描述会导致驳回。
+-->
+<dict>
+
+    <!-- ══════════════════════════════════════════════════
+         权限用途说明（中文）
+         ══════════════════════════════════════════════════ -->
+
+    <!-- 相机：扫码绑定密钥 -->
+    <key>NSCameraUsageDescription</key>
+    <string>用于扫描二维码以自动绑定动态令牌密钥。相机画面仅在您的设备上实时识别，不会拍摄、保存或上传任何图像。</string>
+
+    <!-- 相册读取：导入二维码图片 -->
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>用于从相册中选择二维码图片，以导入动态令牌密钥。图片仅在您的设备上解析，不会上传。</string>
+
+    <!-- 相册写入：保存导出图片 -->
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>用于将导出的密钥二维码图片保存到您的相册，方便您备份与迁移。</string>
+
+    <!-- Face ID：人脸解锁 -->
+    <key>NSFaceIDUsageDescription</key>
+    <string>用于通过 Face ID 快速解锁本应用。您的面容数据由系统安全管理，本应用不会接触或存储任何生物特征信息。</string>
+
+    <!-- 位置：局域网 FTP 服务器发现 -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>用于发现您所在局域网内的 FTP 服务器，以便备份加密密钥。位置信息不会被记录或上传。</string>
+
+    <!-- 本地网络：连接局域网 FTP -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>用于连接您自行填写的局域网 FTP 服务器，完成密钥备份与恢复。</string>
+
+    <!-- Bonjour 服务声明（配合本地网络权限） -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_ftp._tcp</string>
+        <string>_ftps._tcp</string>
+    </array>
+
+    <!-- ══════════════════════════════════════════════════
+         网络安全
+         ══════════════════════════════════════════════════ -->
+
+    <!--
+      ATS 配置：默认禁止明文 HTTP
+
+      ⚠️ 常见误区：将 NSAllowsArbitraryLoads 设为 true 会
+         引发 Apple 审核质疑，非必要不要开启。
+         FTP 备份应引导用户使用 FTPS（显式 TLS）。
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <false/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+
+    <!-- ══════════════════════════════════════════════════
+         应用信息
+         ══════════════════════════════════════════════════ -->
+
+    <key>CFBundleDisplayName</key>
+    <string>菩提护令</string>
+
+    <key>CFBundleName</key>
+    <string>bodhi_token</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.3</string>
+
+    <key>CFBundleVersion</key>
+    <string>203</string>
+
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+
+    <!-- 本地化支持 -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh_CN</string>
+        <string>en</string>
+    </array>
+
+    <!-- ══════════════════════════════════════════════════
+         界面配置
+         ══════════════════════════════════════════════════ -->
+
+    <!-- 锁定竖屏 -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    </array>
+
+    <!-- 状态栏样式：浅色背景用深色文字 -->
+    <key>UIStatusBarStyle</key>
+    <string>UIStatusBarStyleDarkContent</string>
+
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <true/>
+
+    <!-- 启动页 storyboard -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+
+    <key>UIMainStoryboardFile</key>
+    <string>Main</string>
+
+    <!-- ══════════════════════════════════════════════════
+         安全相关
+         ══════════════════════════════════════════════════ -->
+
+    <!-- 关闭 iTunes 文件共享，避免密钥数据库被导出 -->
+    <key>UIFileSharingEnabled</key>
+    <false/>
+
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <false/>
+
+    <!-- 禁止在应用切换器中显示内容快照（防截屏泄露） -->
+    <key>UIApplicationExitsOnSuspend</key>
+    <false/>
+
+    <!-- 支持 otpauth:// 链接导入 -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLName</key>
+            <string>com.daotuo.bodhitoken.otpauth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>otpauth</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- 声明不使用加密出口限制（仅使用系统标准加密时选 false） -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+
+</dict>

@@ -1,0 +1,72 @@
+# ═══════════════════════════════════════════════════════════
+#  菩提护令 · Git 忽略规则
+# ═══════════════════════════════════════════════════════════
+
+# ── 🔴 签名密钥：绝不允许提交 ──────────────────────────────
+# 一旦泄露，任何人都能伪造你 App 的更新包
+*.jks
+*.keystore
+key.properties
+**/key.properties
+*.b64
+!ci/*.py
+
+# ── 敏感备份文件 ──────────────────────────────────────────
+*.bodhi
+*.bodhibak
+backup_*
+*_backup.json
+
+# ── 🔴 TOTP 密钥样本：绝不允许提交 ─────────────────────────
+# 一条迁移 URI / 一张二维码截图 = 完整密钥，可被直接还原出 6 位验证码。
+# 调试用的真实样本一律放在工程目录之外的临时路径。
+*real_uri*.txt
+*real_crop*.png
+*real_qr*.png
+migration_uri.txt
+migration_batches.txt
+*otpauth*migration*.txt
+
+# ── Flutter / Dart ────────────────────────────────────────
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# ── Flutter 自动生成的原生工程 ─────────────────────────────
+# CI 会执行 `flutter create` 重新生成，无需提交
+/android/
+#/ios/
+/linux/
+/macos/
+/windows/
+/web/
+# 但保留我们自定义的模板目录
+!/platform/
+
+# ── IDE ───────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── 操作系统 ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 构建产物 ──────────────────────────────────────────────
+dist/
+*.apk
+*.aab
+*.ipa
+*.log
+
+# ── Python 字节码 ─────────────────────────────────────────
+__pycache__/
+*.pyc

@@ -1,0 +1,71 @@
+// Gradle 初始化脚本：把 google() / mavenCentral() / gradlePluginPortal()
+// 全部重定向到国内镜像（dl.google.com 与 repo.maven.apache.org 在本机不可达）。
+//
+// 用法：
+//   gradle ... --init-script <本文件>
+// 或放入 GRADLE_USER_HOME/init.d/
+
+def ALIYUN_GOOGLE = 'https://maven.aliyun.com/repository/google'
+def ALIYUN_CENTRAL = 'https://maven.aliyun.com/repository/public'
+def ALIYUN_PLUGIN = 'https://maven.aliyun.com/repository/gradle-plugin'
+def TENCENT_CENTRAL = 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public'
+
+def repo = { String url ->
+    return [
+        name: "mirror-${url.replaceAll('[^a-zA-Z0-9]', '_')}",
+        url : url,
+        allowInsecureProtocol: false,
+    ]
+}
+
+settingsEvaluated { settings ->
+    settings.pluginManagement {
+        repositories {
+            clear()
+            maven { url ALIYUN_PLUGIN }
+            maven { url ALIYUN_GOOGLE }
+            maven { url ALIYUN_CENTRAL }
+            maven { url TENCENT_CENTRAL }
+            gradlePluginPortal()
+            google()
+            mavenCentral()
+        }
+    }
+    try {
+        settings.dependencyResolutionManagement {
+            repositories {
+                clear()
+                maven { url ALIYUN_GOOGLE }
+                maven { url ALIYUN_CENTRAL }
+                maven { url TENCENT_CENTRAL }
+                google()
+                mavenCentral()
+            }
+        }
+        settings.dependencyResolutionManagement.repositoriesMode.set(
+            org.gradle.api.initialization.resolve.RepositoriesMode.PREFER_SETTINGS
+        )
+    } catch (Exception ignored) {
+    }
+}
+
+allprojects { p ->
+    p.repositories {
+        clear()
+        maven { url ALIYUN_GOOGLE }
+        maven { url ALIYUN_CENTRAL }
+        maven { url TENCENT_CENTRAL }
+        google()
+        mavenCentral()
+    }
+    p.buildscript.repositories {
+        clear()
+        maven { url ALIYUN_PLUGIN }
+        maven { url ALIYUN_GOOGLE }
+        maven { url ALIYUN_CENTRAL }
+        maven { url TENCENT_CENTRAL }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}

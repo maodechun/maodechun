@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  菩提护令 · iOS 隐私清单（Privacy Manifest）
+
+  Apple 自 2024 年 5 月起要求 App 提供此文件。
+  放置位置：ios/Runner/PrivacyInfo.xcprivacy
+
+  说明：
+    - NSPrivacyTracking = false    因为不追踪用户
+    - NSPrivacyCollectedDataTypes  为空数组，因为不收集数据
+      （所有数据仅存设备本机，开发者无法访问，按 Apple 定义不算收集）
+    - NSPrivacyAccessedAPITypes    声明使用的受管 API 及原因代码
+-->
+<plist version="1.0">
+<dict>
+
+    <!-- ══════════════════════════════════════════════════
+         是否追踪用户
+         ══════════════════════════════════════════════════ -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <!-- ══════════════════════════════════════════════════
+         收集的数据类型（空 = 不收集任何数据）
+         ══════════════════════════════════════════════════ -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+
+    <!-- ══════════════════════════════════════════════════
+         访问的受管 API 及原因
+
+         原因代码说明：
+           CA92.1  仅访问本 App 自身的 UserDefaults
+           C617.1  仅访问本 App 容器内的文件时间戳
+           35F9.1  用于测量经过时间（TOTP 计时必需）
+           E174.1  仅检查本 App 容器内可用磁盘空间
+         ══════════════════════════════════════════════════ -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+
+        <!-- UserDefaults：存储用户设置（安全开关、隐私同意状态等） -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+
+        <!-- 文件时间戳：读取本地数据库文件 -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+
+        <!-- 系统启动时间：TOTP 时间同步必需 -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+
+        <!-- 磁盘空间：FTP 备份前检查可用空间 -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>E174.1</string>
+            </array>
+        </dict>
+
+    </array>
+
+</dict>
+</plist>

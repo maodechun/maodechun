@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════
+#  菩提护令 · 苹果安装包自动构建（GitHub Actions 云端 macOS）
+# ═══════════════════════════════════════════════════════════════════
+#
+#  用途：代码推到 GitHub 后，由 GitHub 免费提供的 macOS 云主机编译出
+#        未签名 IPA（编译本身无需自己的 Mac，也无需付费账号）。
+#
+#  ── 怎么用（三步）────────────────────────────────────────────────
+#   1. 把 bodhi_token/ 推到 GitHub 仓库
+#   2. 仓库页面点「Actions」→ 左侧「构建苹果安装包」→「Run workflow」
+#   3. 等 15~25 分钟，在运行详情页底部 Artifacts 下载「菩提护令-iOS包」
+#
+#  ── 关于签名（重要）──────────────────────────────────────────────
+#   本工作流产出的是【未签名 IPA】，不能直接装到 iPhone。
+#   安装到真机需要苹果开发者签名，三种途径：
+#
+#   A. 正式分发（推荐，可长期使用）：
+#      注册 Apple Developer Program（$99/年），在下方 Secrets 配置
+#      IOS_P12_BASE64 / IOS_P12_PASSWORD / IOS_MOBILEPROVISION_BASE64，
+#      并把 workflow 里 --no-codesign 改为正常签名流程，产物可上
+#      TestFlight / App Store。
+#
+#   B. 免费侧载（试用，7 天有效期）：
+#      下载未签名 IPA 到电脑，用 Sideloadly / AltStore 配合自己的
+#      免费 Apple ID 签名后安装（需 7 天重签一次）。
+#
+#   C. 有 Mac 的朋友代签：Xcode 打开 ios/Runner.xcworkspace 直接编译。
+#
+# ═══════════════════════════════════════════════════════════════════
+
+name: 构建苹果安装包
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: 拉取 Dart 依赖
+        run: flutter pub get
+
+      - name: 安装 CocoaPods 依赖
+        run: cd ios && pod install && cd ..
+
+      # 未签名编译：不需要任何苹果证书即可完成（验证代码能编译通过）
+      - name: 编译未签名 IPA
+        run: |
+          flutter build ios --release --no-codesign
+          mkdir -p build/ios/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios/Payload/
+          cd build/ios
+          zip -qr 菩提护令-未签名.ipa Payload
+          cd ../..
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: 菩提护令-iOS包
+          path: build/ios/菩提护令-未签名.ipa
+          retention-days: 30

@@ -1,0 +1,24 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # 安全相关：禁止打印语句（防止密钥泄露到日志）
+    avoid_print: true
+    # 代码质量
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_final_locals: true
+    avoid_unnecessary_containers: true
+    sized_box_for_whitespace: true
+    use_key_in_widget_constructors: true
+
+analyzer:
+  errors:
+    # 打印语句视为错误，强制开发者使用 logger 或移除
+    avoid_print: error
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - build/**
+    - android/**
+    - ios/**
