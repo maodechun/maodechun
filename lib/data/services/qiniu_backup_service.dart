@@ -39,6 +39,9 @@ class QiniuBackupService {
 
   static const String _phonePrefKey = 'cloud_backup_phone';
 
+  /// 恢复失败时的管理员协助提示
+  static const String adminHint = '，如仍无法恢复请联系管理员协助找回';
+
   String? _phone;
 
   /// 已绑定的手机号（未设置过为 null）
@@ -172,8 +175,8 @@ class QiniuBackupService {
         return QiniuBackupResult(
           success: false,
           message: resp.statusCode == 404
-              ? '恢复失败：该手机号在云端没有备份'
-              : '恢复失败：云端返回 ${resp.statusCode}',
+              ? '恢复失败：该手机号在云端没有备份$adminHint'
+              : '恢复失败：云端返回 ${resp.statusCode}$adminHint',
         );
       }
       encrypted = await resp.transform(utf8.decoder).join();
@@ -185,15 +188,15 @@ class QiniuBackupService {
     if (encrypted.isEmpty) {
       return const QiniuBackupResult(
         success: false,
-        message: '恢复失败：备份文件为空',
+        message: '恢复失败：备份文件为空，如仍无法恢复请联系管理员协助找回',
       );
     }
 
     final plain = SecretStore.decryptWithPassword(encrypted, phone);
     if (plain == null) {
-      return const QiniuBackupResult(
+      return QiniuBackupResult(
         success: false,
-        message: '恢复失败：云端数据校验不符或已损坏',
+        message: '恢复失败：云端数据校验不符或已损坏$adminHint',
       );
     }
 
