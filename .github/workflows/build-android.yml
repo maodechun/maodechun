@@ -121,6 +121,15 @@ jobs:
             echo "✅ network_security_config.xml 已覆盖"
           fi
 
+          # MainActivity 必须是 FlutterFragmentActivity：
+          # local_auth（指纹 / 3D 人脸）依赖 FragmentActivity 承载
+          # 系统 BiometricPrompt，用 flutter create 默认的
+          # FlutterActivity 会导致生物识别静默失败、只能密码解锁。
+          mkdir -p android/app/src/main/kotlin/com/daotuo/bodhi_token
+          cp platform/android/MainActivity.kt \
+             android/app/src/main/kotlin/com/daotuo/bodhi_token/MainActivity.kt
+          echo "✅ MainActivity 已替换为 FlutterFragmentActivity"
+
       # ── 6. 恢复签名密钥（若配置了 Secrets）─────────────
       - name: 恢复签名密钥
         id: keystore
