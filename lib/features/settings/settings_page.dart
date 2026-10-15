@@ -1235,7 +1235,19 @@ class _SettingsPageState extends State<SettingsPage> {
     final result = await QiniuBackupService.instance.backup(input);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    _showSnack(result.message);
+    // 成功/失败必须让用户明确知道：成功弹窗确认，失败红色提示停留更久
+    if (result.success) {
+      final when = DateTime.now().toString().substring(0, 16);
+      await _showCloudSuccess('云备份成功', <String>[
+        '备份手机号：$input',
+        '已备份令牌：${TokenRepository.instance.tokens.length} 个',
+        '令牌已用此手机号加密上传到云端，换手机、误删都能'
+            '在「云恢复」里输入此手机号找回。',
+        '备份时间：$when',
+      ]);
+    } else {
+      _showCloudError('云备份失败：${result.message}');
+    }
   }
 
   /// 从云端恢复：输入手机号 → 下载最新备份并导入
@@ -1255,7 +1267,86 @@ class _SettingsPageState extends State<SettingsPage> {
         await QiniuBackupService.instance.restore(input, merge: true);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    _showSnack(result.message);
+    // 成功/失败必须让用户明确知道：成功弹窗确认，失败红色提示停留更久
+    if (result.success) {
+      await _showCloudSuccess('云恢复成功', <String>[
+        '恢复手机号：$input',
+        '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
+        '云端令牌已与手机现有令牌合并（重复的自动跳过），'
+            '请回到令牌列表确认。',
+        '提示：若刚换新令牌，建议点「云备份」把最新数据再备份一次。',
+      ]);
+    } else {
+      _showCloudError('云恢复失败：${result.message}');
+    }
+  }
+
+  /// 云备份/恢复成功提示：绿色 ✅ 弹窗，必须点「我知道了」才关闭
+  Future<void> _showCloudSuccess(String title, List<String> lines) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: BodhiColors.paperLight,
+        title: Row(
+          children: [
+            const Icon(
+              Icons.check_circle,
+              color: Color(0xFF2E7D32),
+              size: 26,
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(title, style: BodhiTypography.pageTitle)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final line in lines)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(line, style: BodhiTypography.caption),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('我知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 云备份/恢复失败提示：红色悬浮条 + ❌，停留 6 秒
+  void _showCloudError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(
+              Icons.error_outline,
+              color: Color(0xFFFFCDD2),
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: BodhiTypography.caption.copyWith(
+                  color: BodhiColors.paperLight,
+                ),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: const Color(0xFF8C3A2E),
+        duration: const Duration(seconds: 6),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   /// 询问手机号弹窗（11 位大陆手机号，无需验证码）
@@ -1843,7 +1934,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v5.3.4' : _currentVersion,
+            _currentVersion.isEmpty ? 'v5.3.5' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -1896,7 +1987,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.4" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.5" : _currentVersion}）')}',
     );
 
     try {
@@ -1933,7 +2024,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.4" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.5" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,
