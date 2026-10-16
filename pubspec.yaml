@@ -1,7 +1,7 @@
 name: bodhi_token
 description: 菩提护令 - 古色古香的离线动态令牌（TOTP）工具
 publish_to: 'none'
-version: 6.0.0+60002
+version: 6.0.0+60003
 
 environment:
   sdk: '>=3.2.0 <4.0.0'
