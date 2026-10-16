@@ -139,6 +139,13 @@ jobs:
           if ! grep -q zxing android/app/build.gradle.kts; then
             cat platform/android/scan-deps.txt >> android/app/build.gradle.kts
           fi
+
+          # 版本号覆写为四段正式版号（pubspec 的 version 仅支持三段）
+          if [ -f platform/android/version-name.txt ]; then
+            VN=$(cat platform/android/version-name.txt)
+            python3 platform/android/set_version_name.py "$VN"
+            echo "✅ 版本号已覆写为 $VN"
+          fi
           echo "✅ 原生扫码引擎与依赖已注入"
 
           # 本地密钥备份引擎（下载/菩提护令备份 目录读写 + SAF 选文件）

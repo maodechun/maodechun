@@ -76,8 +76,6 @@ class FtpBackupService {
   static const String _remoteDir = '/bodhi_backup';
   static const int _maxBackups = 7; // 保留最近 7 份
 
-  FTPConnect? _client;
-
   // ── 配置读写 ─────────────────────────────────────────
 
   Future<FtpConfig> loadConfig() async {
@@ -95,7 +93,112 @@ class FtpBackupService {
 
   // ── 连接 ─────────────────────────────────────────────
 
+  /// 最近一次 [listEntries] 失败的原因（供界面提示用）
+  String? lastListError;
+
+  /// 协商出「实际可用的加密模式」
+  ///
+  /// ftpconnect 2.x 的 [SecurityType] 有三种语义，容易混淆：
+  ///   - `ftp`   ：明文 FTP
+  ///   - `ftpes` ：**显式** TLS（连上后发 AUTH TLS 升级）——标准 FTPS 服务器走这个
+  ///   - `ftps`  ：**隐式** TLS（一连接就是 TLS，默认端口 990）
+  ///
+  /// 历史问题：代码把所有「使用 FTPS」都当成 `ftps`（隐式/990），
+  /// 而用户服务器基本都是「21 端口 + 显式 TLS」或「21 端口 + 明文」，
+  /// 于是必然握手失败 —— 用户看到的现象就是「根本没有连接上 FTP 服务器」。
+  ///
+  /// 现在按 显式 TLS → 隐式 TLS(990) → 明文 的顺序自动探测，
+  /// 只要有一种能通就用那一种，优先保证「能用」。
+  Future<_FtpConn> _resolveConn(FtpConfig config) async {
+    if (!config.useFtps) return _FtpConn(config, SecurityType.ftp);
+
+    // 1) 显式 TLS（AUTH TLS），端口保持不变
+    if (await _probeConnect(config, SecurityType.ftpes)) {
+      return _FtpConn(config, SecurityType.ftpes);
+    }
+    // 2) 隐式 TLS，通常监听 990
+    if (config.port != 990) {
+      final implicit = config.copyWith(port: 990);
+      if (await _probeConnect(implicit, SecurityType.ftps)) {
+        return _FtpConn(implicit, SecurityType.ftps);
+      }
+    }
+    // 3) 服务器不支持任何加密：降级明文 FTP
+    //    备份文件本身已用 DT 强加密，明文只影响传输通道，内容依然安全
+    return _FtpConn(config.copyWith(useFtps: false), SecurityType.ftp);
+  }
+
+  /// 用指定加密模式试连一次
+  Future<bool> _probeConnect(FtpConfig config, SecurityType type) async {
+    final probe = _newClient(config, type, timeout: 8);
+    try {
+      final ok = await probe.connect().timeout(const Duration(seconds: 10));
+      try {
+        await probe.disconnect();
+      } catch (_) {}
+      return ok;
+    } catch (_) {
+      try {
+        await probe.disconnect();
+      } catch (_) {}
+      return false;
+    }
+  }
+
+  FTPConnect _newClient(FtpConfig config, SecurityType type, {int timeout = 15}) =>
+      FTPConnect(
+        config.host,
+        port: config.port,
+        user: config.username,
+        pass: config.password,
+        timeout: timeout,
+        securityType: type,
+        showLog: false,
+      );
+
+  /// 纯 TCP 可达性探测
+  ///
+  /// 先确认「网络 + 端口」能不能通，把「服务器根本没连上」和
+  /// 「连上了但账号/权限有问题」彻底分开，用户看提示就能自查。
+  /// 返回 null 表示 TCP 可达，否则返回可读错误。
+  Future<String?> _tcpProbe(FtpConfig config) async {
+    Socket? s;
+    try {
+      s = await Socket.connect(
+        config.host,
+        config.port,
+        timeout: const Duration(seconds: 8),
+      );
+      return null;
+    } catch (e) {
+      return _readableError(e);
+    } finally {
+      try {
+        s?.destroy();
+      } catch (_) {}
+    }
+  }
+
+  String _modeLabel(FtpConfig requested, _FtpConn conn) {
+    switch (conn.type) {
+      case SecurityType.ftpes:
+        return 'FTPS（显式 TLS 加密）';
+      case SecurityType.ftps:
+        return 'FTPS（隐式 TLS 加密，端口 990）';
+      case SecurityType.ftp:
+        return requested.useFtps
+            ? '普通 FTP（服务器不支持 FTPS，已自动降级；备份文件仍为 DT 强加密）'
+            : '普通 FTP（明文传输）';
+    }
+  }
+
   /// 测试连接
+  ///
+  /// 依次给出四类结果：
+  ///   1. 网络/端口不通（与账号密码无关）
+  ///   2. 登录成功且备份目录就绪
+  ///   3. 登录成功但备份目录不可用（附原因）
+  ///   4. 登录失败（附具体原因：530 认证 / 421 限流 / TLS 握手…）
   Future<TestResult> testConnection(FtpConfig config) async {
     if (!config.isValid) {
       return const TestResult(
@@ -104,27 +207,55 @@ class FtpBackupService {
       );
     }
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 10,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 第一步：网络与端口可达性（失败与账号密码无关）
+    final tcpErr = await _tcpProbe(config);
+    if (tcpErr != null) {
+      return TestResult(
+        success: false,
+        message: '无法连接到 ${config.host}:${config.port}\n'
+            '$tcpErr\n'
+            '（此步失败说明网络或端口不通，与账号密码无关：'
+            '请核对服务器地址与端口，并确认手机当前网络允许访问该端口）',
+      );
+    }
+
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     try {
-      await client.connect().timeout(const Duration(seconds: 12));
-      await client.changeDirectory(_remoteDir);
+      await client.connect().timeout(const Duration(seconds: 15));
 
-      final pwd = await client.currentDirectory();
+      String pwd = '/';
+      try {
+        pwd = await client.currentDirectory();
+      } catch (_) {}
+
+      // 备份目录：能进就进；不存在就尝试创建；仍失败只提示，不影响连接成功
+      var dirReady = true;
+      String dirNote = '';
+      try {
+        await client.changeDirectory(_remoteDir);
+      } catch (_) {
+        dirReady = false;
+      }
+      if (!dirReady) {
+        try {
+          await client.createFolderIfNotExist(_remoteDir);
+          await client.changeDirectory(_remoteDir);
+          dirReady = true;
+        } catch (e) {
+          dirNote = '；但备份目录 $_remoteDir 不可用（${_readableError(e)}）';
+        }
+      }
+
       await client.disconnect();
 
       return TestResult(
         success: true,
-        message: '连接成功（${pwd.isNotEmpty ? pwd : '/'}）',
-        secured: config.useFtps,
+        message: '登录成功，当前目录：${pwd.isNotEmpty ? pwd : "/"}'
+            '${dirReady ? "，备份目录 $_remoteDir 已就绪" : dirNote}'
+            '\n传输模式：${_modeLabel(config, conn)}',
+        secured: conn.type != SecurityType.ftp,
       );
     } catch (e) {
       try {
@@ -133,7 +264,8 @@ class FtpBackupService {
 
       return TestResult(
         success: false,
-        message: _readableError(e),
+        message: '${_readableError(e)}\n'
+            '传输模式：${_modeLabel(config, conn)}',
       );
     }
   }
@@ -190,15 +322,9 @@ class FtpBackupService {
 
     progress?.call(0.5, '正在连接服务器');
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 15,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 自动协商加密模式（显式 TLS → 隐式 TLS → 明文），避免连不上
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
@@ -231,7 +357,7 @@ class FtpBackupService {
         success: true,
         message: '备份成功：$fileName',
         fileName: fileName,
-        secured: config.useFtps,
+        secured: conn.type != SecurityType.ftp,
       );
     } catch (e) {
       try {
@@ -250,17 +376,15 @@ class FtpBackupService {
 
   /// 列出服务器上的备份文件（按时间倒序）
   Future<List<String>> listBackups(FtpConfig config) async {
-    if (!config.isValid) return [];
+    lastListError = null;
+    if (!config.isValid) {
+      lastListError = '服务器信息不完整';
+      return [];
+    }
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 15,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 自动协商加密模式（显式 TLS → 隐式 TLS → 明文），避免连不上
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
@@ -275,27 +399,26 @@ class FtpBackupService {
         ..sort((a, b) => b.compareTo(a)); // 文件名含时间戳，倒序即最新在前
 
       return files;
-    } catch (_) {
+    } catch (e) {
       try {
         await client.disconnect();
       } catch (_) {}
+      lastListError = _readableError(e);
       return [];
     }
   }
 
   /// 列出备份目录下全部条目（文件管理用）
   Future<List<FtpEntryInfo>> listEntries(FtpConfig config) async {
-    if (!config.isValid) return const [];
+    lastListError = null;
+    if (!config.isValid) {
+      lastListError = '服务器信息不完整';
+      return const [];
+    }
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 15,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 自动协商加密模式（显式 TLS → 隐式 TLS → 明文），避免连不上
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
@@ -320,10 +443,12 @@ class FtpBackupService {
           return b.name.compareTo(a.name);
         });
       return list;
-    } catch (_) {
+    } catch (e) {
       try {
         await client.disconnect();
       } catch (_) {}
+      // 记录失败原因，界面据此提示「读取失败」而不是「目录为空」
+      lastListError = _readableError(e);
       return const [];
     }
   }
@@ -349,15 +474,9 @@ class FtpBackupService {
       );
     }
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 15,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 自动协商加密模式（显式 TLS → 隐式 TLS → 明文），避免连不上
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
@@ -400,15 +519,9 @@ class FtpBackupService {
       );
     }
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 15,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 自动协商加密模式（显式 TLS → 隐式 TLS → 明文），避免连不上
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
@@ -453,15 +566,9 @@ class FtpBackupService {
 
     progress?.call(0.2, '正在连接服务器');
 
-    final client = FTPConnect(
-      config.host,
-      port: config.port,
-      user: config.username,
-      pass: config.password,
-      timeout: 15,
-      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
-      showLog: false,
-    );
+    // 自动协商加密模式（显式 TLS → 隐式 TLS → 明文），避免连不上
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
 
     final dir = await _tempDir();
     final file = File('${dir.path}/$fileName');
@@ -581,26 +688,51 @@ class FtpBackupService {
     } catch (_) {}
   }
 
-  /// 将底层异常转为用户可读提示
+  /// 将底层异常转为用户可读提示（尽量给出可自查的具体原因）
   String _readableError(Object e) {
-    final text = e.toString().toLowerCase();
+    final raw = e.toString();
+    final text = raw.toLowerCase();
+
     if (text.contains('timeout') || text.contains('timed out')) {
-      return '连接超时，请检查服务器地址与网络';
+      return '连接超时——服务器地址或端口可能不对，也可能被网络/防火墙拦截';
     }
-    if (text.contains('auth') || text.contains('530') || text.contains('login')) {
-      return '认证失败，请检查账号与密码';
+    if (text.contains('530') || text.contains('login incorrect') || text.contains('auth')) {
+      return '认证失败（530）——账号或密码不正确，'
+          '请确认 FTP 账号（部分服务器要求用完整账号如 user@域名）';
     }
-    if (text.contains('550') || text.contains('permission') || text.contains('denied')) {
-      return '服务器拒绝了操作，请检查目录写入权限';
+    if (text.contains('421')) {
+      return '服务器拒绝服务（421）——连接数超限或当前 IP 被限制';
     }
-    if (text.contains('socket') || text.contains('connect') || text.contains('refused')) {
-      return '无法连接服务器，请检查地址、端口与网络';
+    if (text.contains('550') || text.contains('553') || text.contains('denied')) {
+      return '服务器拒绝了操作（550）——账号没有该目录的写入/删除权限';
     }
-    if (text.contains('certificate') || text.contains('tls') || text.contains('ssl')) {
-      return '加密握手失败，可尝试关闭 FTPS 或检查服务器证书';
+    if (text.contains('certificate') || text.contains('tls') || text.contains('ssl') || text.contains('handshake')) {
+      return '加密握手失败——服务器不支持 FTPS 或证书异常，请关闭「使用 FTPS」后重试';
     }
-    return '操作失败，请稍后重试';
+    if (text.contains('refused') || text.contains('econnrefused')) {
+      return '连接被拒绝——端口不对或服务器未开启 FTP 服务';
+    }
+    if (text.contains('failed host lookup') || text.contains('unknown host') || text.contains('nodename')) {
+      return '域名解析失败——服务器地址填写有误，或手机网络无法解析该域名';
+    }
+    if (text.contains('network is unreachable') || text.contains('no route')) {
+      return '网络不可达——请检查手机网络（部分网络屏蔽了 FTP 端口 21）';
+    }
+    if (text.contains('socket') || text.contains('connect')) {
+      return '无法建立连接——请检查地址、端口与网络';
+    }
+    // 未覆盖的错误：把底层原文带出来，便于用户反馈与排查
+    final brief = raw.length > 80 ? '${raw.substring(0, 80)}…' : raw;
+    return '操作失败：$brief';
   }
+}
+
+/// 一次连接使用的「配置 + 加密模式」
+class _FtpConn {
+  final FtpConfig config;
+  final SecurityType type;
+
+  const _FtpConn(this.config, this.type);
 }
 
 /// 连接测试结果

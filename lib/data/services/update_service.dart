@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart' show md5;
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -17,6 +19,12 @@ class UpdateInfo {
   final String md5;
   final String publishedAt;
 
+  /// 老旧 32 位机型（纯 armv7）专用安装包地址，可为空
+  final String downloadUrlArmv7;
+
+  /// 32 位包 MD5，可为空
+  final String md5Armv7;
+
   const UpdateInfo({
     required this.versionName,
     required this.versionCode,
@@ -26,6 +34,8 @@ class UpdateInfo {
     this.releaseNotes = '',
     this.md5 = '',
     this.publishedAt = '',
+    this.downloadUrlArmv7 = '',
+    this.md5Armv7 = '',
   });
 
   factory UpdateInfo.fromJson(Map<String, Object?> json) {
@@ -38,6 +48,8 @@ class UpdateInfo {
       releaseNotes: (json['releaseNotes'] as String?) ?? '',
       md5: (json['md5'] as String?) ?? '',
       publishedAt: (json['publishedAt'] as String?) ?? '',
+      downloadUrlArmv7: (json['downloadUrlArmv7'] as String?) ?? '',
+      md5Armv7: (json['md5Armv7'] as String?) ?? '',
     );
   }
 
@@ -51,7 +63,7 @@ class UpdateInfo {
 
 /// 在线更新服务
 ///
-/// 更新服务器：https://app.0499.com.cn
+/// 更新服务器：https://apk.0499.com.cn
 /// 安全要求：
 ///   - 仅允许 https 下载
 ///   - 下载完成后校验 MD5，校验失败拒绝安装
@@ -60,8 +72,17 @@ class UpdateService {
   UpdateService._internal();
   static final UpdateService instance = UpdateService._internal();
 
-  static const String baseUrl = 'https://app.0499.com.cn';
+  static const String baseUrl = 'https://apk.0499.com.cn';
+
+  /// 主版本接口（服务端动态接口）
   static const String versionEndpoint = '$baseUrl/api/version';
+
+  /// 备用版本接口（七牛静态清单文件，主接口 404 时自动兜底）
+  ///
+  /// 该文件作为静态对象存放在 apk.0499.com.cn 对应的存储空间内，
+  /// 即使服务器没有部署后端，在线更新也能正常工作。
+  static const String versionEndpointBackup =
+      '$baseUrl/bodhi/version/android.json';
 
   /// 官网（内置浏览器打开）
   static const String websiteUrl = 'https://m.0499.com.cn';
@@ -85,6 +106,83 @@ class UpdateService {
     return 'v${pkg.version}';
   }
 
+  /// 抓取版本清单
+  ///
+  /// 依次尝试「主接口 → 静态兜底文件」。
+  /// 用 [ResponseType.plain] + 手动 jsonDecode，
+  /// 避免静态文件未声明 Content-Type 时被当成字符串而解析失败
+  /// （这是之前在线更新一直失效的原因之一）。
+  Future<Map<String, Object?>?> _fetchManifest(int currentCode) async {
+    final query = {
+      'platform': Platform.isIOS ? 'ios' : 'android',
+      'channel': 'official',
+      'current': currentCode,
+    };
+    for (final url in [versionEndpoint, versionEndpointBackup]) {
+      try {
+        final resp = await _dio.get<String>(
+          url,
+          queryParameters: query,
+          options: Options(responseType: ResponseType.plain),
+        );
+        final body = resp.data;
+        if (body == null || body.trim().isEmpty) continue;
+        final decoded = jsonDecode(body);
+        if (decoded is Map) return decoded.cast<String, Object?>();
+      } catch (_) {
+        // 该地址不可用，继续尝试下一个
+        continue;
+      }
+    }
+    return null;
+  }
+
+  /// 判断本机是否只支持 32 位（老旧机型需要 armv7 安装包）
+  Future<bool> _isPureArm32() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      final android = await DeviceInfoPlugin().androidInfo;
+      final abis = android.supportedAbis
+          .map((e) => e.toLowerCase())
+          .toList();
+      if (abis.isEmpty) return false;
+      final has64 = abis.any(
+        (e) => e.contains('arm64') || e.contains('aarch64') ||
+               e.contains('x86_64') || e.contains('64'),
+      );
+      return !has64;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 逐段比较版本号，[remote] 比 [local] 新时返回 true
+  ///
+  /// 必须用版本名而不是 versionCode 判断：
+  /// `--split-per-abi` 会按 ABI 给 versionCode 加偏移
+  /// （arm64 = 基准+2000，armv7 = 基准+1000），
+  /// 同一版本的两种包 versionCode 并不相同，直接用版本号比较最可靠。
+  static bool isNewerVersion(String remote, String local) {
+    List<int> parse(String s) {
+      final cleaned = s.trim().replaceAll(RegExp(r'^[vV]'), '');
+      return cleaned
+          .split(RegExp(r'[.\-+_]'))
+          .map((e) => int.tryParse(e.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
+          .toList();
+    }
+
+    if (remote.trim().isEmpty) return false;
+    final a = parse(remote);
+    final b = parse(local);
+    final n = a.length > b.length ? a.length : b.length;
+    for (var i = 0; i < n; i++) {
+      final x = i < a.length ? a[i] : 0;
+      final y = i < b.length ? b[i] : 0;
+      if (x != y) return x > y;
+    }
+    return false;
+  }
+
   /// 检查更新
   ///
   /// [silent] 静默检查（启动时）：任何异常都返回 null，不打扰用户
@@ -93,37 +191,41 @@ class UpdateService {
     try {
       final pkg = await _packageInfo();
       final currentCode = int.tryParse(pkg.buildNumber) ?? 0;
+      final currentName = pkg.version;
 
-      final response = await _dio.get<Map<String, Object?>>(
-        versionEndpoint,
-        queryParameters: {
-          'platform': Platform.isIOS ? 'ios' : 'android',
-          'channel': 'official',
-          'current': currentCode,
-        },
-      );
-
-      final data = response.data;
+      final data = await _fetchManifest(currentCode);
       if (data == null) return null;
 
       final info = UpdateInfo.fromJson(data);
 
-      // 判定是否需要更新
-      if (info.versionCode <= currentCode) return null;
+      // 判定是否需要更新：优先按版本名比较（不受 ABI 偏移影响）
+      final newerByName = isNewerVersion(info.versionName, currentName);
+      final newerByCode = info.versionCode > currentCode;
+      if (!newerByName && !newerByCode) return null;
 
-      // 计算是否强制
+      // 计算是否强制（此判断仍按 versionCode 基准值）
       final forced = info.forceUpdate ||
           (info.minSupportVersion > 0 && currentCode < info.minSupportVersion);
+
+      // 按本机 ABI 选择安装包
+      var url = info.downloadUrl;
+      var md5sum = info.md5;
+      if (await _isPureArm32() && info.downloadUrlArmv7.isNotEmpty) {
+        url = info.downloadUrlArmv7;
+        if (info.md5Armv7.isNotEmpty) md5sum = info.md5Armv7;
+      }
 
       return UpdateInfo(
         versionName: info.versionName,
         versionCode: info.versionCode,
         forceUpdate: forced,
         minSupportVersion: info.minSupportVersion,
-        downloadUrl: info.downloadUrl,
+        downloadUrl: url,
         releaseNotes: info.releaseNotes,
-        md5: info.md5,
+        md5: md5sum,
         publishedAt: info.publishedAt,
+        downloadUrlArmv7: info.downloadUrlArmv7,
+        md5Armv7: info.md5Armv7,
       );
     } catch (_) {
       // 网络不可用 / 服务器异常：静默返回，不打断用户

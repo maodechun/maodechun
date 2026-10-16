@@ -3,30 +3,22 @@
   网络安全配置
 
   策略：
-    - 全局禁止明文流量（cleartextTrafficPermitted=false）
-    - FTP 备份若使用明文 FTP，需在此为具体域名开例外
-    - 强烈建议保持禁止，强制用户使用 FTPS
+    - 允许明文流量：FTP 备份会优先尝试 FTPS（显式 TLS），
+      若用户服务器不支持加密则自动降级为普通 FTP。
+      若此处禁止明文，降级后的明文 FTP 会被系统层面拦截，
+      用户看到的现象就是「根本没有连接上 FTP 服务器」。
+    - 备份文件本身已用 DT 专有强加密（AES-256-GCM + HMAC），
+      即使走明文 FTP，服务器与网络中间人也拿不到密钥内容。
 
   放置位置：android/app/src/main/res/xml/network_security_config.xml
 -->
 <network-security-config>
 
-    <!-- 默认：禁止一切明文流量 -->
-    <base-config cleartextTrafficPermitted="false">
+    <!-- 默认：允许明文流量（仅用于兼容用户自建 FTP 服务器） -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-
-    <!--
-      例外：仅当用户明确使用明文 FTP 时才需要解开注释。
-
-      ⚠️ 安全提示：解开后该域名的所有明文流量都会被放行，
-      存在被中间人攻击的风险。建议引导用户使用 FTPS。
-
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">ftp.example.com</domain>
-    </domain-config>
-    -->
 
 </network-security-config>

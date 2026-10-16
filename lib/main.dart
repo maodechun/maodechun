@@ -50,7 +50,7 @@ class StartupDiag {
   static bool fatal = false;
 
   /// 与 pubspec.yaml version 保持一致（诊断页展示用）
-  static const String appVersion = 'v5.3.9';
+  static const String appVersion = 'v6.0.0.0';
 }
 
 Future<void> main() async {
@@ -66,7 +66,7 @@ Future<void> main() async {
       } else {
         // 初始化完成后：运行期错误只记日志（logcat tag=flutter 可查），
         // 不再劫持界面（例如扫码组件的 ML Kit 内部异常）
-        print('[BodhiFlutterError] ${details.exceptionAsString()}');
+        debugPrint('[BodhiFlutterError] ${details.exceptionAsString()}');
       }
     };
 
@@ -78,7 +78,7 @@ Future<void> main() async {
       StartupDiag.error ??= error.toString();
       StartupDiag.stack ??= stack.toString();
     } else {
-      print('[BodhiZone] runtime error: $error');
+      debugPrint('[BodhiZone] runtime error: $error');
     }
   });
 }

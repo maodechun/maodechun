@@ -868,8 +868,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (result.success) {
       await _showSuccessDialog('FTP 连接成功', <String>[
         '服务器：${_currentConfig.host}:${_currentConfig.port}',
-        '传输模式：${result.secured ? "FTPS（显式 TLS 加密）" : "FTP（明文传输，建议开启 FTPS）"}',
-        result.message,
+        ...result.message.split('\n').where((e) => e.trim().isNotEmpty),
       ]);
     } else {
       _showErrorSnack('FTP 连接失败：${result.message}');
@@ -913,7 +912,7 @@ class _SettingsPageState extends State<SettingsPage> {
       await _showSuccessDialog('FTP 备份成功', <String>[
         '备份文件：${result.fileName ?? ''}',
         '服务器：${_currentConfig.host}:${_currentConfig.port}',
-        '已用备份密码加密（AES-256），恢复时需输入同一密码',
+        '已用 DT 专有强加密（AES-256-GCM + HMAC 防篡改），恢复时需输入同一密码',
         '备份时间：$when',
       ]);
     } else {
@@ -1081,8 +1080,12 @@ class _SettingsPageState extends State<SettingsPage> {
     Navigator.of(context, rootNavigator: true).pop();
 
     if (files.isEmpty) {
+      final err = _ftp.lastListError;
       _showErrorSnack(
-          '服务器上没有找到备份文件（目录 /bodhi_backup），可先执行一次「备份到 FTP」');
+        err != null
+            ? '读取服务器备份列表失败：$err'
+            : '服务器上没有找到备份文件（目录 /bodhi_backup），可先执行一次「备份到 FTP」',
+      );
       return;
     }
 
@@ -1237,7 +1240,12 @@ class _SettingsPageState extends State<SettingsPage> {
               sheetSetState(() => entries = null);
               final list = await _ftp.listEntries(_currentConfig);
               if (!sheetContext.mounted) return;
+              final err = _ftp.lastListError;
               sheetSetState(() => entries = list);
+              // 连接失败时明确提示原因，避免用户误以为「目录是空的」
+              if (list.isEmpty && err != null) {
+                _showErrorSnack('读取备份目录失败：$err');
+              }
             }
 
             // 首次进入自动加载
@@ -2390,7 +2398,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v5.3.9' : _currentVersion,
+            _currentVersion.isEmpty ? 'v6.0.0.0' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -2443,7 +2451,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.9" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.0" : _currentVersion}）')}',
     );
 
     try {
@@ -2480,7 +2488,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.9" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.0" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,

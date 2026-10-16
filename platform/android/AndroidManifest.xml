@@ -93,19 +93,12 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:enableOnBackInvokedCallback="true"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:requestLegacyExternalStorage="false">
 
-        <!-- ══════════════════════════════════════════════
-             网络安全配置
-             说明：FTP 明文传输场景需额外域名白名单。
-             若强制要求 FTPS，可保持默认（全局禁止明文）。
-             ══════════════════════════════════════════════ -->
-        <meta-data
-            android:name="android.security.net.config"
-            android:resource="@xml/network_security_config" />
 
         <!-- ══════════════════════════════════════════════
              主 Activity
