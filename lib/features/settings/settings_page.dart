@@ -619,6 +619,16 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           onTap: _localRestoreFlow,
         ),
+        SettingRow(
+          label: '本机存储自检',
+          hint: '备份/恢复失败时点这里，查看具体是哪里不通',
+          trailing: const Icon(
+            Icons.health_and_safety_outlined,
+            size: 18,
+            color: BodhiColors.gold,
+          ),
+          onTap: _localStorageSelfTest,
+        ),
         const SizedBox(height: 4),
         SettingRow(
           label: '备份到 FTP 服务器',
@@ -1765,7 +1775,69 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 云备份/恢复失败提示：红色悬浮条 + ❌，停留 6 秒
+  /// 失败提示弹窗：红色 ❌ + 具体原因，并可直接跳到「本机存储自检」
+  ///
+  /// 备份/恢复失败时用户一定看得见（snack 容易被忽略），
+  /// 且能一眼看到底层真实原因，而不是「失败」两个字。
+  Future<void> _showFailureDialog(
+    String title,
+    String reason, {
+    bool offerSelfTest = true,
+  }) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: BodhiColors.paperLight,
+        title: Row(
+          children: [
+            const Icon(
+              Icons.error_outline,
+              color: BodhiColors.cinnabar,
+              size: 26,
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(title, style: BodhiTypography.pageTitle)),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(reason, style: BodhiTypography.caption),
+              if (offerSelfTest) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '可点击下方「本机存储自检」，查看本机各存储位置是否可写，'
+                  '据此定位是系统限制还是权限问题。',
+                  style: BodhiTypography.caption.copyWith(
+                    color: BodhiColors.inkFaint,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          if (offerSelfTest)
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+                _localStorageSelfTest();
+              },
+              child: const Text('本机存储自检'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('我知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+  /// 失败提示：红色悬浮条 + ❌，停留 6 秒
   void _showErrorSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1875,17 +1947,28 @@ class _SettingsPageState extends State<SettingsPage> {
     final result = await _local.backup(password);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    // 成功/失败必须明确：成功弹窗展示保存位置，失败红色提示具体原因
+    // 成功/失败必须明确：成功弹窗展示保存位置，失败弹窗给出具体原因
     if (result.success) {
+      final where = result.message.replaceFirst('备份成功，已保存到 ', '');
       await _showSuccessDialog('本地备份成功', <String>[
         '备份文件：${result.fileName ?? ''}',
-        '保存位置：${result.message.replaceFirst("备份成功，已保存到 ", "")}',
+        '保存位置：$where',
         '已用备份密码 DT 专有强加密，恢复时需输入同一密码',
-        '提示：备份时间：${DateTime.now().toString().substring(0, 16)}',
+        '备份时间：${DateTime.now().toString().substring(0, 16)}',
       ]);
     } else {
-      _showErrorSnack(result.message);
+      await _showFailureDialog('本地备份失败', result.message);
     }
+  }
+
+  /// 本机存储自检：把原生侧的诊断结果原样交给用户，
+  /// 便于定位「备份失败 / 找不到备份文件 / 选择器无反应」的真实原因。
+  Future<void> _localStorageSelfTest() async {
+    _showLoading('正在检查本机存储…');
+    final diag = await _local.selfTest();
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+    await _showSuccessDialog('本机存储自检结果', diag.lines);
   }
 
   /// 从本机恢复：列出下载目录备份 → 选择 → 输密码 → 导入
@@ -2032,9 +2115,17 @@ class _SettingsPageState extends State<SettingsPage> {
 
     String id;
     if (picked == pickerTag) {
-      final pickedFile = await _local.pickBackup();
-      if (pickedFile == null || !mounted) return; // 用户取消
-      id = pickedFile.id;
+      _showLoading('正在打开系统文件选择器…');
+      final pick = await _local.pickBackup();
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      if (pick.error != null) {
+        // 选择器打不开必须明说，绝不能毫无反应
+        await _showFailureDialog('无法打开文件选择器', pick.error!);
+        return;
+      }
+      if (pick.file == null) return; // 用户主动取消
+      id = pick.file!.id;
     } else {
       id = picked;
     }
@@ -2047,14 +2138,15 @@ class _SettingsPageState extends State<SettingsPage> {
     final result = await _local.restore(id, password, merge: true);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    // 成功/失败必须明确：成功弹窗展示明细，失败红色提示具体原因
+    // 成功/失败必须明确：成功弹窗展示明细，失败弹窗给出具体原因
     if (result.success) {
       await _showSuccessDialog('本地恢复成功', <String>[
+        result.message,
         '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
         '已与现有令牌合并（重复自动跳过），请回到令牌列表确认',
       ]);
     } else {
-      _showErrorSnack(result.message);
+      await _showFailureDialog('本地恢复失败', result.message);
     }
   }
 
@@ -2065,7 +2157,7 @@ class _SettingsPageState extends State<SettingsPage> {
       children: [
         SettingRow(
           label: '在线更新',
-          hint: '更新服务器 app.0499.com.cn',
+          hint: '更新服务器 apk.0499.com.cn',
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2398,7 +2490,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v6.0.0.0' : _currentVersion,
+            _currentVersion.isEmpty ? 'v6.0.0.1' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -2451,7 +2543,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.0" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.1" : _currentVersion}）')}',
     );
 
     try {
@@ -2488,7 +2580,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.0" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.1" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,

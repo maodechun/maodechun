@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 import '../../core/security/dt_cipher.dart';
-import '../../core/security/secret_store.dart';
 import '../repository/token_repository.dart';
 
 /// 本地密钥备份服务
@@ -12,8 +11,10 @@ import '../repository/token_repository.dart';
 ///
 /// 特性：
 ///   - 写入公共下载目录（MediaStore），卸载重装后文件依然存在
-///   - 本应用作为文件 owner 始终可读，重装后可直接恢复
+///   - 原生侧三级写入兜底，任一位置可写即成功，并如实上报落盘位置
 ///   - 无备份密码（至少 6 位）任何人无法解密
+///
+/// 约定：**任何失败都必须返回可读原因**，不允许静默返回 null。
 class LocalBackupService {
   LocalBackupService._internal();
   static final LocalBackupService instance = LocalBackupService._internal();
@@ -35,7 +36,7 @@ class LocalBackupService {
     if (repo.isEmpty) {
       return const LocalBackupResult(
         success: false,
-        message: '备份失败：当前没有任何令牌',
+        message: '备份失败：当前没有任何令牌，请先添加令牌再备份',
       );
     }
 
@@ -57,8 +58,17 @@ class LocalBackupService {
 
     // DT 专有强加密容器（AES-256-GCM + PBKDF2 高轮次 + HMAC 防篡改），
     // 以 base64 文本写入（原生存储通道要求字符串内容）
-    final encrypted = DtCipher.encryptToText(plainJson, password);
-    final fileName = TokenRepository.buildBackupFileName();
+    final String encrypted;
+    final String fileName;
+    try {
+      encrypted = DtCipher.encryptToText(plainJson, password);
+      fileName = TokenRepository.buildBackupFileName();
+    } catch (e) {
+      return LocalBackupResult(
+        success: false,
+        message: '备份失败：加密过程出错（$e）',
+      );
+    }
 
     try {
       final r = await _channel.invokeMethod<Map>('saveBackup', {
@@ -74,26 +84,31 @@ class LocalBackupService {
     } on PlatformException catch (e) {
       return LocalBackupResult(
         success: false,
-        message: '备份失败：${e.message ?? "存储不可用"}',
+        message: '备份失败：${e.message ?? e.code}',
       );
     } on MissingPluginException {
       return const LocalBackupResult(
         success: false,
-        message: '备份失败：本机不支持（缺少存储通道）',
+        message: '备份失败：本机不支持（缺少存储通道 bodhi/local_backup，'
+            '说明安装的应用包不完整，请重新安装最新版）',
+      );
+    } catch (e) {
+      return LocalBackupResult(
+        success: false,
+        message: '备份失败：$e',
       );
     }
   }
 
   /// 列出本机备份文件（按时间倒序）
+  ///
+  /// 原生侧会同时扫描 MediaStore 索引与多个下载目录并去重，
+  /// 避免「重装后索引被清空、找不到备份」。
   Future<List<LocalBackupFile>> listBackups() async {
-    // ignore: avoid_print
-    print('[LocalBackup] listBackups begin');
     try {
       final list = await _channel.invokeListMethod<Map>('listBackups');
-      // ignore: avoid_print
-      print('[LocalBackup] listBackups raw=${list?.length}');
       if (list == null) return [];
-      final files = list
+      return list
           .map((m) => LocalBackupFile(
                 id: (m['id'] ?? '') as String,
                 name: (m['name'] ?? '') as String,
@@ -103,51 +118,67 @@ class LocalBackupService {
               f.id.isNotEmpty &&
               (f.name.endsWith('.dt') || f.name.endsWith('.btk')))
           .toList();
-      // ignore: avoid_print
-      print('[LocalBackup] listBackups files=${files.length}');
-      return files;
-    } on PlatformException catch (e) {
-      // ignore: avoid_print
-      print('[LocalBackup] listBackups PlatformException: ${e.code} ${e.message}');
+    } on PlatformException {
       return [];
     } on MissingPluginException {
-      // ignore: avoid_print
-      print('[LocalBackup] listBackups MissingPluginException');
       return [];
+    }
+  }
+
+  /// 本机存储自检：把「哪一步坏了」直接取回来给用户看
+  Future<StorageDiagnostics> selfTest() async {
+    try {
+      final m = await _channel.invokeMapMethod<String, dynamic>('selfTest');
+      if (m == null) {
+        return const StorageDiagnostics(lines: ['自检未返回数据（原生通道无响应）']);
+      }
+      final lines = <String>[
+        '存储通道：${m['channel']}',
+        '系统版本：Android API ${m['sdkInt']}',
+        'MediaStore 写入：${m['mediaStore']}',
+        '候选目录（共 ${m['dirCount']} 个）：',
+        ...((m['dirs'] as List?) ?? const []).map((e) => '  · $e'),
+        '已找到的备份文件：${((m['found'] as List?) ?? const []).isEmpty ? "无" : (m['found'] as List).join("、")}',
+      ];
+      return StorageDiagnostics(lines: lines);
+    } on PlatformException catch (e) {
+      return StorageDiagnostics(
+        lines: ['自检失败：${e.message ?? e.code}'],
+      );
+    } on MissingPluginException {
+      return const StorageDiagnostics(
+        lines: ['自检失败：本机不支持（缺少存储通道 bodhi/local_backup）'],
+      );
     }
   }
 
   /// 拉起系统文件管理器选择备份文件（SAF）
   ///
-  /// 卸载重装后 MediaStore 索引被清空、查询不到旧备份时，
-  /// 用系统文件选择器直接读取下载目录中的 .btk 文件。
-  /// 返回 null = 用户取消。
-  Future<LocalBackupFile?> pickBackup() async {
+  /// 返回值区分三种情况：
+  ///   - [LocalPickResult.file] 非空 → 用户选中了文件
+  ///   - [LocalPickResult.error] 非空 → 选择器无法打开（附具体原因）
+  ///   - 两者都为空 → 用户主动取消
+  Future<LocalPickResult> pickBackup() async {
     try {
-      // ignore: avoid_print
-      print('[LocalBackup] pickBackup begin');
       final m = await _channel.invokeMapMethod<String, dynamic>('pickBackup');
-      if (m == null) {
-        // ignore: avoid_print
-        print('[LocalBackup] pickBackup cancelled');
-        return null;
-      }
-      final f = LocalBackupFile(
-        id: (m['id'] ?? '') as String,
-        name: (m['name'] ?? '') as String,
-        size: (m['size'] as num?)?.toInt() ?? 0,
+      if (m == null) return const LocalPickResult(); // 用户取消
+      return LocalPickResult(
+        file: LocalBackupFile(
+          id: (m['id'] ?? '') as String,
+          name: (m['name'] ?? '') as String,
+          size: (m['size'] as num?)?.toInt() ?? 0,
+        ),
       );
-      // ignore: avoid_print
-      print('[LocalBackup] pickBackup picked: ${f.name}');
-      return f;
     } on PlatformException catch (e) {
-      // ignore: avoid_print
-      print('[LocalBackup] pickBackup PlatformException: ${e.code}');
-      return null;
+      return LocalPickResult(
+        error: e.message ?? '无法打开系统文件选择器（${e.code}）',
+      );
     } on MissingPluginException {
-      // ignore: avoid_print
-      print('[LocalBackup] pickBackup MissingPluginException');
-      return null;
+      return const LocalPickResult(
+        error: '本机不支持（缺少存储通道 bodhi/local_backup），请重新安装最新版',
+      );
+    } catch (e) {
+      return LocalPickResult(error: '$e');
     }
   }
 
@@ -159,49 +190,61 @@ class LocalBackupService {
     String password, {
     bool merge = true,
   }) async {
+    if (id.trim().isEmpty) {
+      return const LocalBackupResult(
+        success: false,
+        message: '恢复失败：未选择备份文件',
+      );
+    }
+
     final String content;
     try {
       content =
           await _channel.invokeMethod<String>('readBackup', {'id': id}) ?? '';
     } on PlatformException catch (e) {
-      // ignore: avoid_print
-      print('[LocalBackup] restore readBackup PlatformException: ${e.code} ${e.message}');
       return LocalBackupResult(
         success: false,
-        message: '恢复失败：无法读取备份文件（${e.message ?? "未知"}）',
+        message: '恢复失败：无法读取备份文件（${e.message ?? e.code}）',
       );
     } on MissingPluginException {
       return const LocalBackupResult(
         success: false,
-        message: '恢复失败：本机不支持（缺少存储通道）',
+        message: '恢复失败：本机不支持（缺少存储通道 bodhi/local_backup），'
+            '请重新安装最新版',
+      );
+    } catch (e) {
+      return LocalBackupResult(
+        success: false,
+        message: '恢复失败：无法读取备份文件（$e）',
       );
     }
 
-    // ignore: avoid_print
-    print('[LocalBackup] restore contentLen=${content.length} head=${content.substring(0, content.length > 24 ? 24 : content.length)}');
-
-    if (content.isEmpty) {
+    if (content.trim().isEmpty) {
       return const LocalBackupResult(
         success: false,
-        message: '恢复失败：备份文件为空',
+        message: '恢复失败：备份文件内容为空（可能不是本应用生成的备份）',
       );
     }
 
-    final plain = DtCipher.decryptAny(utf8.encode(content), password);
-    // ignore: avoid_print
-    print('[LocalBackup] restore decrypt ${plain == null ? "FAILED" : "ok len=${plain.length}"}');
+    final String? plain;
+    try {
+      plain = DtCipher.decryptAny(utf8.encode(content), password);
+    } catch (e) {
+      return LocalBackupResult(
+        success: false,
+        message: '恢复失败：解密过程出错（$e）',
+      );
+    }
     if (plain == null) {
       return const LocalBackupResult(
         success: false,
-        message: '恢复失败：备份密码错误，或文件已损坏',
+        message: '恢复失败：备份密码错误，或文件已损坏/被篡改',
       );
     }
 
     try {
       final result =
           await TokenRepository.instance.restoreFromJson(plain, merge: merge);
-      // ignore: avoid_print
-      print('[LocalBackup] restore repo result success=${result.success} added=${result.added} skipped=${result.skipped} err=${result.error}');
       if (!result.success) {
         return LocalBackupResult(
           success: false,
@@ -213,8 +256,6 @@ class LocalBackupService {
           : '恢复成功：新增 ${result.added} 条';
       return LocalBackupResult(success: true, message: msg);
     } catch (e) {
-      // ignore: avoid_print
-      print('[LocalBackup] restore repo EXCEPTION: $e');
       return LocalBackupResult(success: false, message: '恢复失败：$e');
     }
   }
@@ -226,9 +267,30 @@ class LocalBackupService {
           false;
     } on PlatformException {
       return false;
+    } on MissingPluginException {
+      return false;
     }
   }
 }
+
+/// 系统文件选择结果（区分「取消」与「打开失败」）
+class LocalPickResult {
+  final LocalBackupFile? file;
+  final String? error;
+
+  const LocalPickResult({this.file, this.error});
+
+  /// 用户主动取消
+  bool get cancelled => file == null && error == null;
+}
+
+/// 本机存储自检报告
+class StorageDiagnostics {
+  final List<String> lines;
+
+  const StorageDiagnostics({required this.lines});
+}
+
 
 /// 本机备份文件条目
 class LocalBackupFile {
