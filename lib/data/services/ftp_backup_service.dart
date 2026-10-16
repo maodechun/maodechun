@@ -16,12 +16,19 @@ class FtpConfig {
   final String password;
   final bool useFtps; // 显式 TLS
 
+  /// 备份存放目录（用户在服务器上自行选择）
+  ///
+  /// 默认 `/bodhi_backup`；用户可在设置里浏览服务器目录树自由指定，
+  /// 例如 `/www/backup` 或 `/home/ftpuser/bodhi`。
+  final String remoteDir;
+
   const FtpConfig({
     this.host = '',
     this.port = 21,
     this.username = '',
     this.password = '',
     this.useFtps = true,
+    this.remoteDir = FtpBackupService.defaultRemoteDir,
   });
 
   bool get isValid =>
@@ -31,12 +38,27 @@ class FtpConfig {
       username.trim().isNotEmpty &&
       password.isNotEmpty;
 
+  /// 归一化后的备份目录：始终以 `/` 开头、不带结尾 `/`
+  ///
+  /// FTP 服务器对相对路径的解析各不相同（有的相对登录主目录、
+  /// 有的相对当前目录），统一成绝对路径最稳。
+  String get normalizedRemoteDir {
+    var d = remoteDir.trim().replaceAll('\\', '/');
+    if (d.isEmpty) return FtpBackupService.defaultRemoteDir;
+    if (!d.startsWith('/')) d = '/$d';
+    while (d.length > 1 && d.endsWith('/')) {
+      d = d.substring(0, d.length - 1);
+    }
+    return d;
+  }
+
   Map<String, String> toPrefs() => {
         'ftp_host': host,
         'ftp_port': port.toString(),
         'ftp_user': username,
         'ftp_pass': password,
         'ftp_ftps': useFtps ? '1' : '0',
+        'ftp_dir': normalizedRemoteDir,
       };
 
   static FtpConfig fromPrefs(SharedPreferences prefs) => FtpConfig(
@@ -45,6 +67,8 @@ class FtpConfig {
         username: prefs.getString('ftp_user') ?? '',
         password: prefs.getString('ftp_pass') ?? '',
         useFtps: (prefs.getString('ftp_ftps') ?? '1') == '1',
+        remoteDir:
+            prefs.getString('ftp_dir') ?? FtpBackupService.defaultRemoteDir,
       );
 
   FtpConfig copyWith({
@@ -53,6 +77,7 @@ class FtpConfig {
     String? username,
     String? password,
     bool? useFtps,
+    String? remoteDir,
   }) =>
       FtpConfig(
         host: host ?? this.host,
@@ -60,6 +85,7 @@ class FtpConfig {
         username: username ?? this.username,
         password: password ?? this.password,
         useFtps: useFtps ?? this.useFtps,
+        remoteDir: remoteDir ?? this.remoteDir,
       );
 }
 
@@ -73,7 +99,9 @@ class FtpBackupService {
   FtpBackupService._internal();
   static final FtpBackupService instance = FtpBackupService._internal();
 
-  static const String _remoteDir = '/bodhi_backup';
+  /// 默认备份目录（用户未自行选择时使用）
+  static const String defaultRemoteDir = '/bodhi_backup';
+
   static const int _maxBackups = 7; // 保留最近 7 份
 
   // ── 配置读写 ─────────────────────────────────────────
@@ -230,22 +258,15 @@ class FtpBackupService {
         pwd = await client.currentDirectory();
       } catch (_) {}
 
-      // 备份目录：能进就进；不存在就尝试创建；仍失败只提示，不影响连接成功
+      // 备份目录：能进就进；不存在就逐级创建；仍失败只提示，不影响连接成功
+      final remoteDir = config.normalizedRemoteDir;
       var dirReady = true;
       String dirNote = '';
       try {
-        await client.changeDirectory(_remoteDir);
-      } catch (_) {
+        await _ensureDir(client, remoteDir);
+      } catch (e) {
         dirReady = false;
-      }
-      if (!dirReady) {
-        try {
-          await client.createFolderIfNotExist(_remoteDir);
-          await client.changeDirectory(_remoteDir);
-          dirReady = true;
-        } catch (e) {
-          dirNote = '；但备份目录 $_remoteDir 不可用（${_readableError(e)}）';
-        }
+        dirNote = '；但备份目录 $remoteDir 不可用（${_readableError(e)}）';
       }
 
       await client.disconnect();
@@ -253,7 +274,7 @@ class FtpBackupService {
       return TestResult(
         success: true,
         message: '登录成功，当前目录：${pwd.isNotEmpty ? pwd : "/"}'
-            '${dirReady ? "，备份目录 $_remoteDir 已就绪" : dirNote}'
+            '${dirReady ? "，备份目录 $remoteDir 已就绪" : dirNote}'
             '\n传输模式：${_modeLabel(config, conn)}',
         secured: conn.type != SecurityType.ftp,
       );
@@ -316,6 +337,7 @@ class FtpBackupService {
     final encryptedBytes = DtCipher.encryptToBytes(plainJson, password);
 
     final fileName = TokenRepository.buildBackupFileName();
+    final remoteDir = config.normalizedRemoteDir;
     final dir = await _tempDir();
     final file = File('${dir.path}/$fileName');
     await file.writeAsBytes(encryptedBytes, flush: true);
@@ -329,9 +351,8 @@ class FtpBackupService {
     try {
       await client.connect().timeout(const Duration(seconds: 15));
 
-      progress?.call(0.7, '正在创建备份目录');
-      await client.createFolderIfNotExist(_remoteDir);
-      await client.changeDirectory(_remoteDir);
+      progress?.call(0.7, '正在进入备份目录 $remoteDir');
+      await _ensureDir(client, remoteDir);
 
       progress?.call(0.85, '正在上传备份文件');
       await client.uploadFile(
@@ -388,7 +409,7 @@ class FtpBackupService {
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
-      await client.changeDirectory(_remoteDir);
+      await _ensureDir(client, config.normalizedRemoteDir);
       final entries = await client.listDirectoryContent();
       await client.disconnect();
 
@@ -422,7 +443,7 @@ class FtpBackupService {
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
-      await client.changeDirectory(_remoteDir);
+      await _ensureDir(client, config.normalizedRemoteDir);
       final entries = await client.listDirectoryContent();
       await client.disconnect();
 
@@ -453,6 +474,109 @@ class FtpBackupService {
     }
   }
 
+  /// 浏览服务器目录树 —— 供用户自行选择「备份到哪个目录」
+  ///
+  /// [path] 目标路径，缺省 `/`（服务器根，多数 FTP 账号会被限制在登录主目录）。
+  /// 返回该路径下的子目录列表 + 服务器解析后的真实路径（便于上级跳转）。
+  Future<FtpDirListing> listDirectories(
+    FtpConfig config, {
+    String path = '/',
+  }) async {
+    if (!config.isValid) {
+      return const FtpDirListing(
+        success: false,
+        path: '/',
+        dirs: [],
+        error: '服务器信息不完整，请先填写地址、端口、账号与密码',
+      );
+    }
+
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
+
+    try {
+      await client.connect().timeout(const Duration(seconds: 15));
+      await client.changeDirectory(path);
+
+      // 以服务器返回的真实路径为准（有的服务器把根映射到登录主目录）
+      var real = path;
+      try {
+        real = await client.currentDirectory();
+      } catch (_) {}
+
+      final entries = await client.listDirectoryContent();
+      await client.disconnect();
+
+      final dirs = entries
+          .where((e) => e.type == FTPEntryType.dir)
+          .map((e) => e.name)
+          .where((n) => n != '.' && n != '..' && n.trim().isNotEmpty)
+          .toList()
+        ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+      return FtpDirListing(success: true, path: real, dirs: dirs);
+    } catch (e) {
+      try {
+        await client.disconnect();
+      } catch (_) {}
+      return FtpDirListing(
+        success: false,
+        path: path,
+        dirs: const [],
+        error: _readableError(e),
+      );
+    }
+  }
+
+  /// 在服务器指定目录下新建子目录（供用户挑选目录时即时建目录）
+  Future<BackupResult> createDirectoryAt(
+    FtpConfig config, {
+    required String parent,
+    required String name,
+  }) async {
+    if (!config.isValid) {
+      return const BackupResult(
+        success: false,
+        message: '新建失败：服务器信息不完整',
+      );
+    }
+    final clean = name.trim();
+    if (clean.isEmpty ||
+        clean.contains('/') ||
+        clean.contains('\\') ||
+        clean == '.' ||
+        clean == '..' ||
+        clean.length > 64) {
+      return const BackupResult(
+        success: false,
+        message: '新建失败：文件夹名不能为空，且不能包含 / \\ 等符号（64 字符以内）',
+      );
+    }
+
+    final conn = await _resolveConn(config);
+    final client = _newClient(conn.config, conn.type);
+
+    try {
+      await client.connect().timeout(const Duration(seconds: 15));
+      await client.changeDirectory(parent);
+      await client.createFolderIfNotExist(clean);
+      await client.disconnect();
+      return BackupResult(
+        success: true,
+        message: '已创建文件夹：$clean',
+        fileName: clean,
+      );
+    } catch (e) {
+      try {
+        await client.disconnect();
+      } catch (_) {}
+      return BackupResult(
+        success: false,
+        message: '新建失败：${_readableError(e)}',
+      );
+    }
+  }
+
   /// 在备份目录下新增文件夹
   Future<BackupResult> createFolder(FtpConfig config, String name) async {
     if (!config.isValid) {
@@ -480,7 +604,7 @@ class FtpBackupService {
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
-      await client.changeDirectory(_remoteDir);
+      await _ensureDir(client, config.normalizedRemoteDir);
       await client.createFolderIfNotExist(clean);
       await client.disconnect();
       return BackupResult(success: true, message: '已创建文件夹：$clean');
@@ -525,7 +649,7 @@ class FtpBackupService {
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
-      await client.changeDirectory(_remoteDir);
+      await _ensureDir(client, config.normalizedRemoteDir);
       final ok =
           isDir ? await client.deleteDirectory(clean) : await client.deleteFile(clean);
       await client.disconnect();
@@ -575,7 +699,7 @@ class FtpBackupService {
 
     try {
       await client.connect().timeout(const Duration(seconds: 15));
-      await client.changeDirectory(_remoteDir);
+      await _ensureDir(client, config.normalizedRemoteDir);
 
       progress?.call(0.5, '正在下载备份文件');
       await client.downloadFile(fileName, file);
@@ -625,6 +749,53 @@ class FtpBackupService {
   }
 
   // ── 内部工具 ─────────────────────────────────────────
+
+  /// 确保服务器上的目标目录存在，并把当前目录切进去
+  ///
+  /// 用户可自选任意层级目录（如 `/www/backup/bodhi`），
+  /// 一次性 MKD 深层路径并非所有服务器都支持，因此逐级创建：
+  /// 已存在的层级直接进入，缺失的层级才新建。
+  Future<void> _ensureDir(FTPConnect client, String path) async {
+    // 1) 目录已存在：直接进入即可
+    try {
+      await client.changeDirectory(path);
+      return;
+    } catch (_) {}
+
+    // 2) 逐级创建（先按绝对路径尝试，失败再退回相对当前目录）
+    final parts = path.split('/').where((e) => e.trim().isNotEmpty).toList();
+    final buf = <String>[];
+
+    for (final part in parts) {
+      buf.add(part);
+      final abs = '/${buf.join('/')}';
+
+      final exists = await _tryEnter(client, abs);
+      if (exists) continue;
+
+      var created = await client.makeDirectory(abs);
+      if (!created) created = await client.makeDirectory(part);
+      if (!created) {
+        throw StateError(
+          '无法在服务器上创建目录「$abs」，请检查该账号是否有写入权限，'
+          '或改选一个已存在的目录',
+        );
+      }
+      if (!await _tryEnter(client, abs)) {
+        if (!await _tryEnter(client, part)) {
+          throw StateError('目录「$abs」创建后无法进入，请改选其他目录');
+        }
+      }
+    }
+  }
+
+  Future<bool> _tryEnter(FTPConnect client, String dir) async {
+    try {
+      return await client.changeDirectory(dir);
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// 清理超出保留数量的旧备份
   Future<void> _cleanupOldBackups(FTPConnect client, String justUploaded) async {
@@ -775,5 +946,25 @@ class FtpEntryInfo {
     required this.isDir,
     required this.size,
     this.modifyTime,
+  });
+}
+
+/// 服务器目录浏览结果（选择备份目录用）
+class FtpDirListing {
+  final bool success;
+
+  /// 服务器解析后的真实路径
+  final String path;
+
+  /// 该路径下的子目录名（已排序、已过滤 . 与 ..）
+  final List<String> dirs;
+
+  final String? error;
+
+  const FtpDirListing({
+    required this.success,
+    required this.path,
+    required this.dirs,
+    this.error,
   });
 }

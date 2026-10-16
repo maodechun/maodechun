@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/auto_lock_guard.dart';
@@ -71,6 +70,8 @@ class _SettingsPageState extends State<SettingsPage> {
   final _portController = TextEditingController(text: '21');
   final _userController = TextEditingController();
   final _passController = TextEditingController();
+  final _remoteDirController =
+      TextEditingController(text: FtpBackupService.defaultRemoteDir);
   bool _useFtps = true;
   bool _obscurePass = true;
   bool _configLoaded = false;
@@ -99,6 +100,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _portController.dispose();
     _userController.dispose();
     _passController.dispose();
+    _remoteDirController.dispose();
     super.dispose();
   }
 
@@ -110,6 +112,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _portController.text = config.port.toString();
       _userController.text = config.username;
       _passController.text = config.password;
+      _remoteDirController.text = config.normalizedRemoteDir;
       _useFtps = config.useFtps;
       _configLoaded = true;
     });
@@ -127,6 +130,7 @@ class _SettingsPageState extends State<SettingsPage> {
         username: _userController.text.trim(),
         password: _passController.text,
         useFtps: _useFtps,
+        remoteDir: _remoteDirController.text,
       );
 
   // ── 构建 ─────────────────────────────────────────────
@@ -722,6 +726,30 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
 
+        const SizedBox(height: 10),
+        // 备份目录：由用户自行选择服务器上的存放位置
+        _buildField(
+          label: '备份目录（服务器上的存放位置）',
+          controller: _remoteDirController,
+          hint: FtpBackupService.defaultRemoteDir,
+        ),
+        const SizedBox(height: 8),
+        OutlineGoldButton(
+          label: '浏览服务器目录并选择',
+          icon: Icons.folder_open,
+          onPressed: _configLoaded ? _pickRemoteDir : null,
+          height: 38,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '备份文件将上传到该目录，恢复时也从该目录读取。'
+          '可手动填写路径，或点击上方按钮浏览服务器目录树逐步选择。',
+          style: BodhiTypography.caption.copyWith(
+            fontSize: 11,
+            color: BodhiColors.inkFaint,
+          ),
+        ),
+
         const SizedBox(height: 16),
         Row(
           children: [
@@ -885,6 +913,398 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // ── 备份目录选择 ─────────────────────────────────────
+
+  /// 取某个路径的上级目录
+  String _parentOf(String path) {
+    var p = path.trim().replaceAll('\\', '/');
+    if (p.isEmpty || p == '/') return '/';
+    while (p.length > 1 && p.endsWith('/')) {
+      p = p.substring(0, p.length - 1);
+    }
+    final idx = p.lastIndexOf('/');
+    if (idx <= 0) return '/';
+    return p.substring(0, idx);
+  }
+
+  /// 浏览 FTP 服务器目录树，由用户自行选择备份存放目录
+  Future<void> _pickRemoteDir() async {
+    if (!_currentConfig.isValid) {
+      _showSnack('请先完整填写服务器地址、端口、账号与密码');
+      return;
+    }
+    await _ftp.saveConfig(_currentConfig);
+    if (!mounted) return;
+
+    var startPath = _remoteDirController.text.trim();
+    if (startPath.isEmpty) startPath = FtpBackupService.defaultRemoteDir;
+
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        FtpDirListing? listing;
+        var currentPath = startPath;
+        var loading = false;
+        String? error;
+
+        return StatefulBuilder(
+          builder: (sheetContext, sheetSetState) {
+            Future<void> load(String path) async {
+              sheetSetState(() {
+                loading = true;
+                error = null;
+                listing = null;
+              });
+              final r = await _ftp.listDirectories(_currentConfig, path: path);
+              if (!sheetContext.mounted) return;
+              sheetSetState(() {
+                loading = false;
+                listing = r;
+                currentPath = r.path.trim().isEmpty ? path : r.path;
+                error = r.success ? null : (r.error ?? '无法读取该目录');
+              });
+            }
+
+            Future<void> createFolderHere() async {
+              final controller = TextEditingController();
+              final name = await showDialog<String>(
+                context: sheetContext,
+                builder: (dialogContext) => AlertDialog(
+                  backgroundColor: BodhiColors.cardWhite,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  title: Text('新建文件夹', style: BodhiTypography.pageTitle),
+                  content: TextField(
+                    controller: controller,
+                    autofocus: true,
+                    style: BodhiTypography.fieldText,
+                    decoration: const InputDecoration(hintText: '文件夹名称'),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('取消'),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext)
+                          .pop(controller.text.trim()),
+                      child: const Text('创建'),
+                    ),
+                  ],
+                ),
+              );
+              if (name == null || name.isEmpty) return;
+              final r = await _ftp.createDirectoryAt(
+                _currentConfig,
+                parent: currentPath,
+                name: name,
+              );
+              if (!sheetContext.mounted) return;
+              if (!r.success) {
+                _showErrorSnack(r.message);
+                return;
+              }
+              unawaited(load(currentPath));
+            }
+
+            // 首次进入自动加载当前目录
+            if (listing == null && !loading && error == null) {
+              scheduleMicrotask(() => load(currentPath));
+            }
+
+            final dirs = listing?.dirs ?? const <String>[];
+            final errText = error;
+
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(sheetContext).size.height * 0.76,
+              ),
+              decoration: const BoxDecoration(
+                color: BodhiColors.cardWhite,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(height: 8),
+                    Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: BodhiColors.divider,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('选择备份目录', style: BodhiTypography.pageTitle),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${_currentConfig.host} · $currentPath',
+                            style: BodhiTypography.caption.copyWith(
+                              fontSize: 11,
+                              color: BodhiColors.inkFaint,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlineGoldButton(
+                              label: '上级目录',
+                              onPressed: currentPath == '/'
+                                  ? null
+                                  : () => load(_parentOf(currentPath)),
+                              height: 34,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: OutlineGoldButton(
+                              label: '新建文件夹',
+                              onPressed: createFolderHere,
+                              height: 34,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: GoldButton(
+                              label: '选此目录',
+                              onPressed: () =>
+                                  Navigator.of(sheetContext).pop(currentPath),
+                              height: 34,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Divider(height: 1),
+                    Flexible(
+                      child: loading
+                          ? const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 36),
+                              child: Center(
+                                child: SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation(
+                                      BodhiColors.gold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : errText != null
+                              ? Padding(
+                                  padding: const EdgeInsets.all(20),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.error_outline,
+                                        color: BodhiColors.cinnabar,
+                                        size: 28,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        errText,
+                                        textAlign: TextAlign.center,
+                                        style: BodhiTypography.caption,
+                                      ),
+                                      const SizedBox(height: 10),
+                                      Text(
+                                        '可点「上级目录」逐级退回到有权限的目录，'
+                                        '或直接在上一个页面手动填写完整路径。',
+                                        textAlign: TextAlign.center,
+                                        style: BodhiTypography.caption.copyWith(
+                                          fontSize: 11,
+                                          color: BodhiColors.inkFaint,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              : dirs.isEmpty
+                                  ? Padding(
+                                      padding: const EdgeInsets.all(24),
+                                      child: Text(
+                                        '该目录下没有子文件夹。\n'
+                                        '可直接点右上角「选此目录」备份到这里。',
+                                        textAlign: TextAlign.center,
+                                        style: BodhiTypography.caption,
+                                      ),
+                                    )
+                                  : ListView.builder(
+                                      shrinkWrap: true,
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 4,
+                                      ),
+                                      itemCount: dirs.length,
+                                      itemBuilder: (context, index) {
+                                        final name = dirs[index];
+                                        final isCurrent = currentPath ==
+                                                '/$name' ||
+                                            currentPath.endsWith('/$name');
+                                        return ListTile(
+                                          dense: true,
+                                          leading: const Icon(
+                                            Icons.folder,
+                                            size: 20,
+                                            color: BodhiColors.gold,
+                                          ),
+                                          title: Text(
+                                            name,
+                                            style: BodhiTypography.fieldText,
+                                          ),
+                                          subtitle: isCurrent
+                                              ? Text(
+                                                  '当前目录',
+                                                  style: BodhiTypography.caption
+                                                      .copyWith(fontSize: 11),
+                                                )
+                                              : null,
+                                          onTap: () => load(
+                                            currentPath == '/'
+                                                ? '/$name'
+                                                : '$currentPath/$name',
+                                          ),
+                                        );
+                                      },
+                                    ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (picked == null || !mounted) return;
+    setState(() => _remoteDirController.text = picked);
+    await _ftp.saveConfig(_currentConfig);
+    if (!mounted) return;
+    await _showSuccessDialog('备份目录已设置', <String>[
+      '备份文件将保存到：${_currentConfig.normalizedRemoteDir}',
+      '恢复时也会从该目录读取备份文件',
+      '若该目录不存在，备份时会自动创建',
+    ]);
+  }
+
+  /// 弹出带进度条的模态对话框
+  ///
+  /// 返回「更新进度」的回调；调用方任务结束后需自行 pop 关闭该对话框。
+  Future<void Function(double, String)> _showProgressDialog(String title) async {
+    final notifier = ValueNotifier<_ProgressState>(
+      const _ProgressState(0, '准备中…'),
+    );
+
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            backgroundColor: BodhiColors.paperLight,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(24),
+            ),
+            title: Row(
+              children: [
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation(BodhiColors.gold),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(child: Text(title, style: BodhiTypography.pageTitle)),
+              ],
+            ),
+            content: ValueListenableBuilder<_ProgressState>(
+              valueListenable: notifier,
+              builder: (context, state, _) {
+                final percent =
+                    (state.value * 100).clamp(0, 100).toStringAsFixed(0);
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            state.stage,
+                            style: BodhiTypography.caption,
+                          ),
+                        ),
+                        Text(
+                          '$percent%',
+                          style: BodhiTypography.caption.copyWith(
+                            color: BodhiColors.gold,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: state.value,
+                        minHeight: 7,
+                        backgroundColor: BodhiColors.divider,
+                        valueColor:
+                            const AlwaysStoppedAnimation(BodhiColors.gold),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '请勿退出本页面，中断会导致备份失败。',
+                      style: BodhiTypography.caption.copyWith(
+                        fontSize: 11,
+                        color: BodhiColors.inkFaint,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return (p, stage) {
+      notifier.value = _ProgressState(p.clamp(0.0, 1.0), stage);
+    };
+  }
+
+  /// 立即备份到 FTP 服务器
+  ///
+  /// 成功后弹窗告知文件名与落盘目录；失败一律弹窗并给出底层真实原因。
+  /// 全程显示进度条，用户始终知道进行到哪一步。
   Future<void> _startBackup() async {
     if (!_currentConfig.isValid) {
       _showSnack('请先完整填写服务器地址、端口、账号与密码');
@@ -893,19 +1313,26 @@ class _SettingsPageState extends State<SettingsPage> {
 
     // 备份密码：优先复用 FTP 密码，亦可单独输入
     final password = await _askBackupPassword();
-    if (password == null) return;
+    if (password == null || !mounted) return;
 
+    final remoteDir = _currentConfig.normalizedRemoteDir;
     await _ftp.saveConfig(_currentConfig);
+    if (!mounted) return;
+
     setState(() {
       _backingUp = true;
       _progress = 0;
-      _progressStage = '准备中';
+      _progressStage = '准备中…';
     });
+
+    final onProgress = await _showProgressDialog('正在备份到 FTP 服务器');
+    if (!mounted) return;
 
     final result = await _ftp.backup(
       config: _currentConfig,
       password: password,
       progress: (p, stage) {
+        onProgress(p, stage);
         if (!mounted) return;
         setState(() {
           _progress = p;
@@ -915,18 +1342,27 @@ class _SettingsPageState extends State<SettingsPage> {
     );
 
     if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
     setState(() => _backingUp = false);
-    // 成功/失败必须明确：成功弹窗展示详情，失败红色提示具体原因
+
+    // 成功/失败必须明确：成功弹窗展示详情，失败弹窗给出具体原因
     if (result.success) {
       final when = DateTime.now().toString().substring(0, 16);
       await _showSuccessDialog('FTP 备份成功', <String>[
         '备份文件：${result.fileName ?? ''}',
+        '存放目录：$remoteDir',
         '服务器：${_currentConfig.host}:${_currentConfig.port}',
         '已用 DT 专有强加密（AES-256-GCM + HMAC 防篡改），恢复时需输入同一密码',
         '备份时间：$when',
       ]);
     } else {
-      _showErrorSnack(result.message);
+      await _showFailureDialog(
+        'FTP 备份失败',
+        '${result.message}\n'
+        '备份目录：$remoteDir\n'
+        '服务器：${_currentConfig.host}:${_currentConfig.port}',
+        offerSelfTest: false,
+      );
     }
   }
 
@@ -1094,7 +1530,8 @@ class _SettingsPageState extends State<SettingsPage> {
       _showErrorSnack(
         err != null
             ? '读取服务器备份列表失败：$err'
-            : '服务器上没有找到备份文件（目录 /bodhi_backup），可先执行一次「备份到 FTP」',
+            : '服务器上没有找到备份文件（目录 ${_currentConfig.normalizedRemoteDir}），'
+                '可先执行一次「备份到 FTP」',
       );
       return;
     }
@@ -1193,11 +1630,16 @@ class _SettingsPageState extends State<SettingsPage> {
     final password = await _askRestorePassword();
     if (password == null || !mounted) return;
 
+    final remoteDir = _currentConfig.normalizedRemoteDir;
+
     setState(() {
       _backingUp = true;
       _progress = 0;
-      _progressStage = '准备恢复';
+      _progressStage = '准备恢复…';
     });
+
+    final onProgress = await _showProgressDialog('正在从 FTP 服务器恢复');
+    if (!mounted) return;
 
     final result = await _ftp.restore(
       config: _currentConfig,
@@ -1205,6 +1647,7 @@ class _SettingsPageState extends State<SettingsPage> {
       password: password,
       merge: true,
       progress: (p, stage) {
+        onProgress(p, stage);
         if (!mounted) return;
         setState(() {
           _progress = p;
@@ -1214,22 +1657,30 @@ class _SettingsPageState extends State<SettingsPage> {
     );
 
     if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
     setState(() => _backingUp = false);
-    // 成功/失败必须明确：成功弹窗展示详情，失败红色提示具体原因
+    // 成功/失败必须明确：成功弹窗展示详情，失败弹窗给出具体原因
     if (result.success) {
       await _showSuccessDialog('FTP 恢复成功', <String>[
         '来源文件：${result.fileName ?? ''}',
+        '来源目录：$remoteDir',
         '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
         '已与现有令牌合并（重复自动跳过），请回到令牌列表确认',
       ]);
     } else {
-      _showErrorSnack(result.message);
+      await _showFailureDialog(
+        'FTP 恢复失败',
+        '${result.message}\n'
+        '来源文件：$fileName\n'
+        '来源目录：$remoteDir',
+        offerSelfTest: false,
+      );
     }
   }
 
   // ── FTP 文件管理 ─────────────────────────────────────
 
-  /// 打开服务器 /bodhi_backup 目录的文件管理器
+  /// 打开服务器备份目录（用户自选）的文件管理器
   Future<void> _openFtpFileManager() async {
     if (!_currentConfig.isValid) {
       _showSnack('请先完整填写服务器地址、端口、账号与密码');
@@ -1298,7 +1749,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                     style: BodhiTypography.pageTitle),
                                 const SizedBox(height: 2),
                                 Text(
-                                  '${_currentConfig.host}:/bodhi_backup',
+                                  '${_currentConfig.host}:${_currentConfig.normalizedRemoteDir}',
                                   style: BodhiTypography.caption.copyWith(
                                     fontSize: 11,
                                     color: BodhiColors.inkFaint,
@@ -1317,7 +1768,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                   await _ftp.createFolder(_currentConfig, name);
                               if (result.success) {
                                 await _showSuccessDialog('新增成功', <String>[
-                                  '已在 /bodhi_backup 下创建文件夹：$name',
+                                  '已在 ${_currentConfig.normalizedRemoteDir} 下创建文件夹：$name',
                                 ]);
                                 await reload();
                               } else {
@@ -2490,7 +2941,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v6.0.0.1' : _currentVersion,
+            _currentVersion.isEmpty ? 'v6.0.0.2' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -2543,7 +2994,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.1" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.2" : _currentVersion}）')}',
     );
 
     try {
@@ -2561,12 +3012,6 @@ class _SettingsPageState extends State<SettingsPage> {
     const phone = '13307459931';
     final uri = Uri(scheme: 'tel', path: phone);
     try {
-      var ok = false;
-      try {
-        ok = await canLaunchUrl(uri);
-      } catch (_) {
-        ok = false;
-      }
       // Android 11+ 包可见性限制可能导致 canLaunchUrl 误判 false，
       // 拨号 ACTION_DIAL 无需权限，直接尝试拉起兜底
       await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -2580,7 +3025,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.1" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.2" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,
@@ -2644,4 +3089,12 @@ class _SettingsPageState extends State<SettingsPage> {
       },
     );
   }
+}
+
+/// 进度对话框状态（数值 + 阶段说明）
+class _ProgressState {
+  final double value;
+  final String stage;
+
+  const _ProgressState(this.value, this.stage);
 }
