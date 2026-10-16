@@ -1159,9 +1159,6 @@ class _SettingsPageState extends State<SettingsPage> {
                                       itemCount: dirs.length,
                                       itemBuilder: (context, index) {
                                         final name = dirs[index];
-                                        final isCurrent = currentPath ==
-                                                '/$name' ||
-                                            currentPath.endsWith('/$name');
                                         return ListTile(
                                           dense: true,
                                           leading: const Icon(
@@ -1173,13 +1170,11 @@ class _SettingsPageState extends State<SettingsPage> {
                                             name,
                                             style: BodhiTypography.fieldText,
                                           ),
-                                          subtitle: isCurrent
-                                              ? Text(
-                                                  '当前目录',
-                                                  style: BodhiTypography.caption
-                                                      .copyWith(fontSize: 11),
-                                                )
-                                              : null,
+                                          trailing: const Icon(
+                                            Icons.chevron_right,
+                                            size: 18,
+                                            color: BodhiColors.inkFaint,
+                                          ),
                                           onTap: () => load(
                                             currentPath == '/'
                                                 ? '/$name'

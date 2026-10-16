@@ -108,33 +108,81 @@ class UpdateService {
 
   /// 抓取版本清单
   ///
-  /// 依次尝试「主接口 → 静态兜底文件」。
+  /// 依次尝试「按日期分片的清单 → 旧固定路径」。
   /// 用 [ResponseType.plain] + 手动 jsonDecode，
   /// 避免静态文件未声明 Content-Type 时被当成字符串而解析失败
   /// （这是之前在线更新一直失效的原因之一）。
-  Future<Map<String, Object?>?> _fetchManifest(int currentCode) async {
+  ///
+  /// 返回第一份「比本机新」的清单；
+  /// 若找到一份不比本机新的清单，说明线上就是这个版本，直接返回 null。
+  Future<Map<String, Object?>?> _fetchManifest(
+    int currentCode,
+    String currentName,
+  ) async {
     final query = {
       'platform': Platform.isIOS ? 'ios' : 'android',
       'channel': 'official',
       'current': currentCode,
     };
-    for (final url in [versionEndpoint, versionEndpointBackup]) {
+
+    for (final url in _manifestCandidates()) {
       try {
         final resp = await _dio.get<String>(
           url,
           queryParameters: query,
-          options: Options(responseType: ResponseType.plain),
+          options: Options(
+            responseType: ResponseType.plain,
+            headers: {
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache',
+            },
+          ),
         );
         final body = resp.data;
         if (body == null || body.trim().isEmpty) continue;
         final decoded = jsonDecode(body);
-        if (decoded is Map) return decoded.cast<String, Object?>();
+        if (decoded is! Map) continue;
+        final map = decoded.cast<String, Object?>();
+
+        final name = (map['versionName'] as String?) ?? '';
+        final code = (map['versionCode'] as num?)?.toInt() ?? 0;
+        if (isNewerVersion(name, currentName) || code > currentCode) {
+          return map;
+        }
+        // 线上最新版并不比本机新：不需要继续往后找了
+        return null;
       } catch (_) {
-        // 该地址不可用，继续尝试下一个
+        // 该地址不存在或不可用，继续尝试下一个
         continue;
       }
     }
     return null;
+  }
+
+  /// 版本清单候选地址（按「今天」往前逐日回退查找）
+  ///
+  /// 清单文件存放在对象存储 + CDN 后面，**同名对象的边缘缓存接近一年**，
+  /// 覆盖上传后依然会返回旧内容；且该 CDN 忽略了 URL 查询串，
+  /// 用 `?t=时间戳` 破缓存也没用（已实测）。
+  ///
+  /// 因此清单改为**按日期分片存放**：每天一个新路径，天然不会命中旧缓存，
+  /// 历史路径内容不变、可长期缓存，互不影响。
+  ///
+  /// 列表末尾保留旧固定路径，兼容早前发布过的清单。
+  List<String> _manifestCandidates() {
+    final urls = <String>[];
+    // 用 UTC 与本地时区都能覆盖的日期范围：向前回溯 14 天
+    final now = DateTime.now();
+    for (var i = 0; i < 14; i++) {
+      final d = now.subtract(Duration(days: i));
+      final tag = '${d.year}'
+          '${d.month.toString().padLeft(2, '0')}'
+          '${d.day.toString().padLeft(2, '0')}';
+      urls.add('$baseUrl/bodhi/version/d/$tag.json');
+    }
+    urls.add(versionEndpointBackup);
+    urls.add(versionEndpoint);
+    return urls;
   }
 
   /// 判断本机是否只支持 32 位（老旧机型需要 armv7 安装包）
@@ -193,7 +241,7 @@ class UpdateService {
       final currentCode = int.tryParse(pkg.buildNumber) ?? 0;
       final currentName = pkg.version;
 
-      final data = await _fetchManifest(currentCode);
+      final data = await _fetchManifest(currentCode, currentName);
       if (data == null) return null;
 
       final info = UpdateInfo.fromJson(data);
