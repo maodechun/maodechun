@@ -1,12 +1,14 @@
+import 'dart:convert';
 import 'package:flutter/services.dart';
 
+import '../../core/security/dt_cipher.dart';
 import '../../core/security/secret_store.dart';
 import '../repository/token_repository.dart';
 
 /// 本地密钥备份服务
 ///
-/// 将令牌数据经用户密码加密（与 FTP 备份同格式：PBKDF2 派生密钥 +
-/// AES-256-CBC），写入系统「下载/菩提护令备份」目录。
+/// 将令牌数据经用户密码加密（DT 专有强加密容器，见 DtCipher），
+/// 写入系统「下载/菩提护令备份」目录。
 ///
 /// 特性：
 ///   - 写入公共下载目录（MediaStore），卸载重装后文件依然存在
@@ -53,7 +55,9 @@ class LocalBackupService {
       );
     }
 
-    final encrypted = SecretStore.encryptWithPassword(plainJson, password);
+    // DT 专有强加密容器（AES-256-GCM + PBKDF2 高轮次 + HMAC 防篡改），
+    // 以 base64 文本写入（原生存储通道要求字符串内容）
+    final encrypted = DtCipher.encryptToText(plainJson, password);
     final fileName = TokenRepository.buildBackupFileName();
 
     try {
@@ -95,7 +99,9 @@ class LocalBackupService {
                 name: (m['name'] ?? '') as String,
                 size: (m['size'] as num?)?.toInt() ?? 0,
               ))
-          .where((f) => f.id.isNotEmpty && f.name.endsWith('.btk'))
+          .where((f) =>
+              f.id.isNotEmpty &&
+              (f.name.endsWith('.dt') || f.name.endsWith('.btk')))
           .toList();
       // ignore: avoid_print
       print('[LocalBackup] listBackups files=${files.length}');
@@ -181,7 +187,7 @@ class LocalBackupService {
       );
     }
 
-    final plain = SecretStore.decryptWithPassword(content, password);
+    final plain = DtCipher.decryptAny(utf8.encode(content), password);
     // ignore: avoid_print
     print('[LocalBackup] restore decrypt ${plain == null ? "FAILED" : "ok len=${plain.length}"}');
     if (plain == null) {

@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../core/security/secret_store.dart';
+import '../../core/security/dt_cipher.dart';
 import '../repository/token_repository.dart';
 
 /// 七牛云对象存储密钥备份服务
@@ -12,7 +12,8 @@ import '../repository/token_repository.dart';
 ///   - 首次备份输入 11 位手机号，之后自动静默备份，无需任何密码/验证码
 ///   - 备份文件以手机号派生密钥加密（PBKDF2 + AES，与本地/FTP 备份同格式），
 ///     云端不存明文密钥
-///   - 存储路径：bodhi/cloud/<手机号>.btk，同手机号覆盖上传（保留最新一份）
+///   - 存储路径：bodhi/cloud/<手机号>.dt（DT 专有强加密），同手机号覆盖上传；
+///     兼容读取旧 .btk（自动识别旧格式）
 ///   - 换手机：输入同一手机号即可从云端恢复
 ///
 /// 上传凭证由服务端代签（https://www.852233.com.cn/qiniu/sign.php），
@@ -63,8 +64,11 @@ class QiniuBackupService {
     } catch (_) {}
   }
 
-  /// 备份 key
-  static String _objectKey(String phone) => 'bodhi/cloud/$phone.btk';
+  /// 备份 key（新格式 .dt）
+  static String _objectKey(String phone) => 'bodhi/cloud/$phone.dt';
+
+  /// 旧格式 key（历史 .btk 备份，恢复时自动回退查找）
+  static String _legacyObjectKey(String phone) => 'bodhi/cloud/$phone.btk';
 
   /// 代签服务器（SK 只保存在服务端，客户端不含任何密钥）
   static const String _signUrl = 'https://www.852233.com.cn/qiniu/sign.php';
@@ -137,8 +141,8 @@ class QiniuBackupService {
       );
     }
 
-    // 以手机号派生密钥加密（与本地备份同一加密体系）
-    final encrypted = SecretStore.encryptWithPassword(payload, phone);
+    // DT 专有强加密容器（AES-256-GCM + PBKDF2 高轮次 + HMAC 防篡改）
+    final encryptedBytes = DtCipher.encryptToBytes(payload, phone);
     final key = _objectKey(phone);
     // 向代签服务器取上传凭证（客户端不含任何密钥）
     final token = await _resolveUploadToken(phone, key);
@@ -150,7 +154,7 @@ class QiniuBackupService {
     }
 
     try {
-      await _upload(key, token, utf8.encode(encrypted));
+      await _upload(key, token, encryptedBytes);
     } catch (e) {
       return QiniuBackupResult(success: false, message: '备份失败：网络错误（$e）');
     }
@@ -186,40 +190,55 @@ class QiniuBackupService {
       );
     }
 
-    final uri = Uri.https(_downloadDomain, _objectKey(phone));
+    // 优先取新格式 .dt；云端没有时回退旧 .btk（兼容历史备份）
     HttpClient client;
-    String encrypted;
+    List<int> raw;
     try {
       client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
-      final req = await client.getUrl(uri);
-      final resp = await req.close();
-      if (resp.statusCode != 200) {
+
+      Future<List<int>?> fetch(String key) async {
+        final req = await client.getUrl(Uri.https(_downloadDomain, key));
+        final resp = await req.close();
+        if (resp.statusCode != 200) {
+          await resp.drain<void>();
+          return null;
+        }
+        final builder = BytesBuilder();
+        await for (final chunk in resp) {
+          builder.add(chunk);
+        }
+        return builder.toBytes();
+      }
+
+      var fetched = await fetch(_objectKey(phone));
+      fetched ??= await fetch(_legacyObjectKey(phone));
+
+      if (fetched == null) {
         client.close();
         return QiniuBackupResult(
           success: false,
-          message: resp.statusCode == 404
-              ? '恢复失败：该手机号在云端没有备份$adminHint'
-              : '恢复失败：云端返回 ${resp.statusCode}$adminHint',
+          message: '恢复失败：该手机号在云端没有备份$adminHint',
         );
       }
-      encrypted = await resp.transform(utf8.decoder).join();
+      raw = fetched;
       client.close();
     } catch (e) {
       return QiniuBackupResult(success: false, message: '恢复失败：网络错误（$e）');
     }
 
-    if (encrypted.isEmpty) {
+    if (raw.isEmpty) {
       return const QiniuBackupResult(
         success: false,
         message: '恢复失败：备份文件为空，如仍无法恢复请联系管理员协助找回',
       );
     }
 
-    final plain = SecretStore.decryptWithPassword(encrypted, phone);
+    // DT 专有强加密解密（自动兼容旧 BODHI1 格式）
+    final plain = DtCipher.decryptAny(raw, phone);
     if (plain == null) {
       return QiniuBackupResult(
         success: false,
-        message: '恢复失败：云端数据校验不符或已损坏$adminHint',
+        message: '恢复失败：云端数据校验不符、已被篡改或已损坏$adminHint',
       );
     }
 

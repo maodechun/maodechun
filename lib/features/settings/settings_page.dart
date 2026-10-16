@@ -768,6 +768,18 @@ class _SettingsPageState extends State<SettingsPage> {
           onTap: _restoreFlow,
         ),
 
+        SettingRow(
+          label: 'FTP 文件管理',
+          hint: '查看服务器备份文件，支持新增文件夹与删除',
+          height: 44,
+          trailing: const Icon(
+            Icons.folder_open,
+            size: 18,
+            color: BodhiColors.gold,
+          ),
+          onTap: _openFtpFileManager,
+        ),
+
         const SizedBox(height: 4),
         SettingRow(
           label: '云端备份 / 恢复',
@@ -849,7 +861,16 @@ class _SettingsPageState extends State<SettingsPage> {
     final result = await _ftp.testConnection(_currentConfig);
     if (!mounted) return;
     setState(() => _testing = false);
-    _showSnack(result.message);
+    // 成功/失败必须明确：成功弹窗展示详情，失败红色提示具体原因
+    if (result.success) {
+      await _showSuccessDialog('FTP 连接成功', <String>[
+        '服务器：${_currentConfig.host}:${_currentConfig.port}',
+        '传输模式：${result.secured ? "FTPS（显式 TLS 加密）" : "FTP（明文传输，建议开启 FTPS）"}',
+        result.message,
+      ]);
+    } else {
+      _showErrorSnack('FTP 连接失败：${result.message}');
+    }
   }
 
   Future<void> _startBackup() async {
@@ -883,7 +904,18 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (!mounted) return;
     setState(() => _backingUp = false);
-    _showSnack(result.message);
+    // 成功/失败必须明确：成功弹窗展示详情，失败红色提示具体原因
+    if (result.success) {
+      final when = DateTime.now().toString().substring(0, 16);
+      await _showSuccessDialog('FTP 备份成功', <String>[
+        '备份文件：${result.fileName ?? ''}',
+        '服务器：${_currentConfig.host}:${_currentConfig.port}',
+        '已用备份密码加密（AES-256），恢复时需输入同一密码',
+        '备份时间：$when',
+      ]);
+    } else {
+      _showErrorSnack(result.message);
+    }
   }
 
   /// 询问备份密码（用于加密备份文件）
@@ -1046,7 +1078,8 @@ class _SettingsPageState extends State<SettingsPage> {
     Navigator.of(context, rootNavigator: true).pop();
 
     if (files.isEmpty) {
-      _showSnack('服务器上没有找到备份文件');
+      _showErrorSnack(
+          '服务器上没有找到备份文件（目录 /bodhi_backup），可先执行一次「备份到 FTP」');
       return;
     }
 
@@ -1166,7 +1199,409 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (!mounted) return;
     setState(() => _backingUp = false);
-    _showSnack(result.message);
+    // 成功/失败必须明确：成功弹窗展示详情，失败红色提示具体原因
+    if (result.success) {
+      await _showSuccessDialog('FTP 恢复成功', <String>[
+        '来源文件：${result.fileName ?? ''}',
+        '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
+        '已与现有令牌合并（重复自动跳过），请回到令牌列表确认',
+      ]);
+    } else {
+      _showErrorSnack(result.message);
+    }
+  }
+
+  // ── FTP 文件管理 ─────────────────────────────────────
+
+  /// 打开服务器 /bodhi_backup 目录的文件管理器
+  Future<void> _openFtpFileManager() async {
+    if (!_currentConfig.isValid) {
+      _showSnack('请先完整填写服务器地址、端口、账号与密码');
+      return;
+    }
+    await _ftp.saveConfig(_currentConfig);
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        List<FtpEntryInfo>? entries;
+        return StatefulBuilder(
+          builder: (sheetContext, sheetSetState) {
+            Future<void> reload() async {
+              sheetSetState(() => entries = null);
+              final list = await _ftp.listEntries(_currentConfig);
+              if (!sheetContext.mounted) return;
+              sheetSetState(() => entries = list);
+            }
+
+            // 首次进入自动加载
+            if (entries == null) {
+              scheduleMicrotask(reload);
+            }
+
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(sheetContext).size.height * 0.72,
+              ),
+              decoration: const BoxDecoration(
+                color: BodhiColors.cardWhite,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(height: 8),
+                    Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: BodhiColors.divider,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('FTP 文件管理',
+                                    style: BodhiTypography.pageTitle),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${_currentConfig.host}:/bodhi_backup',
+                                  style: BodhiTypography.caption.copyWith(
+                                    fontSize: 11,
+                                    color: BodhiColors.inkFaint,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: () async {
+                              final name = await _askNewFolderName();
+                              if (name == null || !sheetContext.mounted) {
+                                return;
+                              }
+                              final result =
+                                  await _ftp.createFolder(_currentConfig, name);
+                              if (result.success) {
+                                await _showSuccessDialog('新增成功', <String>[
+                                  '已在 /bodhi_backup 下创建文件夹：$name',
+                                ]);
+                                await reload();
+                              } else {
+                                _showErrorSnack(result.message);
+                              }
+                            },
+                            icon: const Icon(
+                              Icons.create_new_folder_outlined,
+                              size: 18,
+                              color: BodhiColors.gold,
+                            ),
+                            label: const Text(
+                              '新增文件夹',
+                              style: TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Divider(height: 1),
+                    Flexible(
+                      child: entries == null
+                          ? const Padding(
+                              padding: EdgeInsets.all(36),
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : (entries!.isEmpty
+                              ? Padding(
+                                  padding: const EdgeInsets.all(32),
+                                  child: Text(
+                                    '目录为空。执行「备份到 FTP」后会在这里看到备份文件。',
+                                    style: BodhiTypography.caption,
+                                    textAlign: TextAlign.center,
+                                  ),
+                                )
+                              : ListView.builder(
+                                  shrinkWrap: true,
+                                  itemCount: entries!.length,
+                                  itemBuilder: (context, index) {
+                                    final e = entries![index];
+                                    return InkWell(
+                                      onTap: () => _showFtpEntryActions(
+                                        e,
+                                        reload,
+                                      ),
+                                      child: SizedBox(
+                                        height: 58,
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 20,
+                                          ),
+                                          child: Row(
+                                            children: [
+                                              Icon(
+                                                e.isDir
+                                                    ? Icons.folder_outlined
+                                                    : Icons
+                                                        .description_outlined,
+                                                size: 20,
+                                                color: e.isDir
+                                                    ? BodhiColors.gold
+                                                    : BodhiColors.inkGray,
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: Column(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment.center,
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      e.name,
+                                                      style: BodhiTypography
+                                                          .rowLabel
+                                                          .copyWith(
+                                                        fontSize: 13,
+                                                        fontFamily: 'monospace',
+                                                      ),
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                    const SizedBox(height: 2),
+                                                    Text(
+                                                      _ftpEntrySubtitle(e),
+                                                      style: BodhiTypography
+                                                          .caption
+                                                          .copyWith(
+                                                        fontSize: 11,
+                                                        color: BodhiColors
+                                                            .inkFaint,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.delete_outline,
+                                                  size: 18,
+                                                  color: BodhiColors.cinnabar,
+                                                ),
+                                                onPressed: () =>
+                                                    _confirmDeleteFtpEntry(
+                                                  e,
+                                                  reload,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ))),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _ftpEntrySubtitle(FtpEntryInfo e) {
+    final parts = <String>[];
+    parts.add(e.isDir ? '文件夹' : _formatFtpSize(e.size));
+    final t = e.modifyTime;
+    if (t != null) parts.add(t.toString().substring(0, 16));
+    return parts.join(' · ');
+  }
+
+  String _formatFtpSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / 1024 / 1024).toStringAsFixed(2)} MB';
+  }
+
+  /// 条目操作菜单：恢复（仅 .btk）与删除
+  void _showFtpEntryActions(
+    FtpEntryInfo entry,
+    Future<void> Function() reload,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (actionContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: BodhiColors.divider,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Text(
+                  entry.name,
+                  style: BodhiTypography.rowLabel.copyWith(
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(height: 6),
+              if (!entry.isDir &&
+                      (entry.name.endsWith('.dt') ||
+                          entry.name.endsWith('.btk')))
+                ListTile(
+                  leading: const Icon(
+                    Icons.restore,
+                    color: BodhiColors.gold,
+                  ),
+                  title: const Text('从此备份恢复令牌'),
+                  onTap: () {
+                    Navigator.pop(actionContext);
+                    _doRestore(entry.name);
+                  },
+                ),
+              ListTile(
+                leading: const Icon(
+                  Icons.delete_outline,
+                  color: BodhiColors.cinnabar,
+                ),
+                title: const Text('删除'),
+                onTap: () {
+                  Navigator.pop(actionContext);
+                  _confirmDeleteFtpEntry(entry, reload);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.close, color: BodhiColors.inkFaint),
+                title: const Text('取消'),
+                onTap: () => Navigator.pop(actionContext),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 删除确认（红字警示不可恢复）→ 执行删除 → 明确提示结果 → 刷新列表
+  Future<void> _confirmDeleteFtpEntry(
+    FtpEntryInfo entry,
+    Future<void> Function() reload,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: BodhiColors.cardWhite,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        title: Text('确认删除', style: BodhiTypography.pageTitle),
+        content: Text(
+          entry.isDir
+              ? '将删除服务器上的文件夹「${entry.name}」（仅空文件夹可删除）。\n\n此操作不可恢复！'
+              : '将永久删除服务器上的备份文件「${entry.name}」。\n\n删除后将无法再从该文件恢复令牌，此操作不可恢复！',
+          style: BodhiTypography.caption,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(
+              '删除',
+              style: TextStyle(color: BodhiColors.cinnabar),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    _showLoading('正在删除…');
+    final result =
+        await _ftp.deleteRemote(_currentConfig, entry.name, isDir: entry.isDir);
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (result.success) {
+      await _showSuccessDialog('删除成功', <String>[
+        '已从服务器删除：${entry.name}',
+      ]);
+      await reload();
+    } else {
+      _showErrorSnack(result.message);
+    }
+  }
+
+  /// 新增文件夹：输入名称
+  Future<String?> _askNewFolderName() async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: BodhiColors.cardWhite,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: Text('新增文件夹', style: BodhiTypography.pageTitle),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 64,
+            decoration: const InputDecoration(
+              hintText: '文件夹名称（不能包含 / \\ 等符号）',
+              counterText: '',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () {
+                final name = controller.text.trim();
+                if (name.isEmpty) return;
+                Navigator.pop(dialogContext, name);
+              },
+              child: const Text('创建'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    return (result == null || result.isEmpty) ? null : result;
   }
 
   Future<String?> _askRestorePassword() async {
@@ -1238,7 +1673,7 @@ class _SettingsPageState extends State<SettingsPage> {
     // 成功/失败必须让用户明确知道：成功弹窗确认，失败红色提示停留更久
     if (result.success) {
       final when = DateTime.now().toString().substring(0, 16);
-      await _showCloudSuccess('云备份成功', <String>[
+      await _showSuccessDialog('云备份成功', <String>[
         '备份手机号：$input',
         '已备份令牌：${TokenRepository.instance.tokens.length} 个',
         '令牌已用此手机号加密上传到云端，换手机、误删都能'
@@ -1246,7 +1681,7 @@ class _SettingsPageState extends State<SettingsPage> {
         '备份时间：$when',
       ]);
     } else {
-      _showCloudError('云备份失败：${result.message}');
+      _showErrorSnack('云备份失败：${result.message}');
     }
   }
 
@@ -1269,7 +1704,7 @@ class _SettingsPageState extends State<SettingsPage> {
     Navigator.of(context, rootNavigator: true).pop();
     // 成功/失败必须让用户明确知道：成功弹窗确认，失败红色提示停留更久
     if (result.success) {
-      await _showCloudSuccess('云恢复成功', <String>[
+      await _showSuccessDialog('云恢复成功', <String>[
         '恢复手机号：$input',
         '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
         '云端令牌已与手机现有令牌合并（重复的自动跳过），'
@@ -1277,12 +1712,12 @@ class _SettingsPageState extends State<SettingsPage> {
         '提示：若刚换新令牌，建议点「云备份」把最新数据再备份一次。',
       ]);
     } else {
-      _showCloudError('云恢复失败：${result.message}');
+      _showErrorSnack('云恢复失败：${result.message}');
     }
   }
 
   /// 云备份/恢复成功提示：绿色 ✅ 弹窗，必须点「我知道了」才关闭
-  Future<void> _showCloudSuccess(String title, List<String> lines) {
+  Future<void> _showSuccessDialog(String title, List<String> lines) {
     return showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -1320,7 +1755,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   /// 云备份/恢复失败提示：红色悬浮条 + ❌，停留 6 秒
-  void _showCloudError(String message) {
+  void _showErrorSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1934,7 +2369,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v5.3.6' : _currentVersion,
+            _currentVersion.isEmpty ? 'v5.3.8' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -1987,7 +2422,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.6" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.8" : _currentVersion}）')}',
     );
 
     try {
@@ -2024,7 +2459,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.6" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.8" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,

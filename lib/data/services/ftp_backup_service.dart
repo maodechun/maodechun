@@ -5,7 +5,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../core/security/secret_store.dart';
+import '../../core/security/dt_cipher.dart';
 import '../repository/token_repository.dart';
 
 /// FTP 服务器配置
@@ -180,13 +180,13 @@ class FtpBackupService {
       );
     }
 
-    progress?.call(0.3, '正在加密备份数据');
-    final encrypted = SecretStore.encryptWithPassword(plainJson, password);
+    progress?.call(0.3, '正在加密备份数据（DT 专有强加密）');
+    final encryptedBytes = DtCipher.encryptToBytes(plainJson, password);
 
     final fileName = TokenRepository.buildBackupFileName();
     final dir = await _tempDir();
     final file = File('${dir.path}/$fileName');
-    await file.writeAsString(encrypted, flush: true);
+    await file.writeAsBytes(encryptedBytes, flush: true);
 
     progress?.call(0.5, '正在连接服务器');
 
@@ -269,7 +269,7 @@ class FtpBackupService {
       await client.disconnect();
 
       final files = entries
-          .where((e) => e.name.endsWith('.btk'))
+          .where((e) => e.name.endsWith('.dt') || e.name.endsWith('.btk'))
           .map((e) => e.name)
           .toList()
         ..sort((a, b) => b.compareTo(a)); // 文件名含时间戳，倒序即最新在前
@@ -280,6 +280,159 @@ class FtpBackupService {
         await client.disconnect();
       } catch (_) {}
       return [];
+    }
+  }
+
+  /// 列出备份目录下全部条目（文件管理用）
+  Future<List<FtpEntryInfo>> listEntries(FtpConfig config) async {
+    if (!config.isValid) return const [];
+
+    final client = FTPConnect(
+      config.host,
+      port: config.port,
+      user: config.username,
+      pass: config.password,
+      timeout: 15,
+      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
+      showLog: false,
+    );
+
+    try {
+      await client.connect().timeout(const Duration(seconds: 15));
+      await client.changeDirectory(_remoteDir);
+      final entries = await client.listDirectoryContent();
+      await client.disconnect();
+
+      final list = entries
+          .where((e) => e.name != '.' && e.name != '..')
+          .map(
+            (e) => FtpEntryInfo(
+              name: e.name,
+              isDir: e.type == FTPEntryType.dir,
+              size: e.size ?? 0,
+              modifyTime: e.modifyTime,
+            ),
+          )
+          .toList()
+        ..sort((a, b) {
+          // 文件夹在前，其余按名称倒序（备份文件名含时间戳，新的在前）
+          if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+          return b.name.compareTo(a.name);
+        });
+      return list;
+    } catch (_) {
+      try {
+        await client.disconnect();
+      } catch (_) {}
+      return const [];
+    }
+  }
+
+  /// 在备份目录下新增文件夹
+  Future<BackupResult> createFolder(FtpConfig config, String name) async {
+    if (!config.isValid) {
+      return const BackupResult(
+        success: false,
+        message: '新增失败：服务器信息不完整',
+      );
+    }
+    final clean = name.trim();
+    if (clean.isEmpty ||
+        clean.contains('/') ||
+        clean.contains('\\') ||
+        clean == '.' ||
+        clean == '..' ||
+        clean.length > 64) {
+      return const BackupResult(
+        success: false,
+        message: '新增失败：文件夹名不能为空，且不能包含 / \\ 等符号（64 字符以内）',
+      );
+    }
+
+    final client = FTPConnect(
+      config.host,
+      port: config.port,
+      user: config.username,
+      pass: config.password,
+      timeout: 15,
+      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
+      showLog: false,
+    );
+
+    try {
+      await client.connect().timeout(const Duration(seconds: 15));
+      await client.changeDirectory(_remoteDir);
+      await client.createFolderIfNotExist(clean);
+      await client.disconnect();
+      return BackupResult(success: true, message: '已创建文件夹：$clean');
+    } catch (e) {
+      try {
+        await client.disconnect();
+      } catch (_) {}
+      return BackupResult(
+        success: false,
+        message: '新增失败：${_readableError(e)}',
+      );
+    }
+  }
+
+  /// 删除备份目录下的文件或空文件夹
+  Future<BackupResult> deleteRemote(
+    FtpConfig config,
+    String name, {
+    required bool isDir,
+  }) async {
+    if (!config.isValid) {
+      return const BackupResult(
+        success: false,
+        message: '删除失败：服务器信息不完整',
+      );
+    }
+    final clean = name.trim();
+    if (clean.isEmpty ||
+        clean.contains('/') ||
+        clean.contains('\\') ||
+        clean == '.' ||
+        clean == '..') {
+      return const BackupResult(
+        success: false,
+        message: '删除失败：非法文件名',
+      );
+    }
+
+    final client = FTPConnect(
+      config.host,
+      port: config.port,
+      user: config.username,
+      pass: config.password,
+      timeout: 15,
+      securityType:          config.useFtps ? SecurityType.ftps : SecurityType.ftp,
+      showLog: false,
+    );
+
+    try {
+      await client.connect().timeout(const Duration(seconds: 15));
+      await client.changeDirectory(_remoteDir);
+      final ok =
+          isDir ? await client.deleteDirectory(clean) : await client.deleteFile(clean);
+      await client.disconnect();
+      if (!ok) {
+        return BackupResult(
+          success: false,
+          message: isDir
+              ? '删除失败：服务器拒绝了该操作（文件夹可能不为空，或无删除权限）'
+              : '删除失败：服务器拒绝了该操作，请检查删除权限',
+        );
+      }
+      return BackupResult(success: true, message: '已删除：$clean');
+    } catch (e) {
+      try {
+        await client.disconnect();
+      } catch (_) {}
+      return BackupResult(
+        success: false,
+        message: '删除失败：${_readableError(e)}',
+      );
     }
   }
 
@@ -321,15 +474,15 @@ class FtpBackupService {
       await client.downloadFile(fileName, file);
 
       await client.disconnect();
-      progress?.call(0.7, '正在解密数据');
+      progress?.call(0.7, '正在解密数据（DT 专有加密）');
 
-      final encrypted = await file.readAsString();
-      final plain = SecretStore.decryptWithPassword(encrypted, password);
+      final raw = await file.readAsBytes();
+      final plain = DtCipher.decryptAny(raw, password);
+      await _safeDelete(file);
       if (plain == null) {
-        await _safeDelete(file);
         return const BackupResult(
           success: false,
-          message: '恢复失败：备份密码错误，或文件已损坏',
+          message: '恢复失败：备份密码错误，或文件已被篡改/损坏',
         );
       }
 
@@ -371,7 +524,7 @@ class FtpBackupService {
     try {
       final entries = await client.listDirectoryContent();
       final backups = entries
-          .where((e) => e.name.endsWith('.btk'))
+          .where((e) => e.name.endsWith('.dt') || e.name.endsWith('.btk'))
           .map((e) => e.name)
           .toList()
         ..sort((a, b) => b.compareTo(a)); // 最新在前
@@ -475,5 +628,20 @@ class BackupResult {
     required this.message,
     this.fileName,
     this.secured = false,
+  });
+}
+
+/// FTP 备份目录下的条目（文件管理用）
+class FtpEntryInfo {
+  final String name;
+  final bool isDir;
+  final int size;
+  final DateTime? modifyTime;
+
+  const FtpEntryInfo({
+    required this.name,
+    required this.isDir,
+    required this.size,
+    this.modifyTime,
   });
 }

@@ -50,7 +50,7 @@ class StartupDiag {
   static bool fatal = false;
 
   /// 与 pubspec.yaml version 保持一致（诊断页展示用）
-  static const String appVersion = 'v5.3.6';
+  static const String appVersion = 'v5.3.8';
 }
 
 Future<void> main() async {

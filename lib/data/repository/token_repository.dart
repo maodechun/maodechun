@@ -366,13 +366,13 @@ class TokenRepository extends ChangeNotifier {
     );
   }
 
-  /// 生成备份文件名
+  /// 生成备份文件名（DT 专有加密格式）
   static String buildBackupFileName() {
     final now = DateTime.now();
     String two(int n) => n.toString().padLeft(2, '0');
     return 'bodhi_token_backup_'
         '${now.year}${two(now.month)}${two(now.day)}_'
-        '${two(now.hour)}${two(now.minute)}${two(now.second)}.btk';
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}.dt';
   }
 
   @override
