@@ -126,10 +126,20 @@ class UpdateService {
     };
 
     for (final url in _manifestCandidates()) {
+      final cancel = CancelToken();
       try {
         final resp = await _dio.get<String>(
           url,
           queryParameters: query,
+          cancelToken: cancel,
+          // 未命中的路径，对象存储会返回一张数 MB 的错误图片。
+          // 一旦发现响应体异常庞大就立刻中断连接，
+          // 避免为了「这个路径没有清单」白下载几 MB 流量。
+          onReceiveProgress: (received, total) {
+            if (total > 8192 || received > 8192) {
+              cancel.cancel('manifest-too-large');
+            }
+          },
           options: Options(
             responseType: ResponseType.plain,
             headers: {
@@ -140,6 +150,7 @@ class UpdateService {
         );
         final body = resp.data;
         if (body == null || body.trim().isEmpty) continue;
+        if (body.length > 8192) continue;
         final decoded = jsonDecode(body);
         if (decoded is! Map) continue;
         final map = decoded.cast<String, Object?>();
