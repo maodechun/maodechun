@@ -141,6 +141,13 @@ jobs:
           fi
           echo "✅ 原生扫码引擎与依赖已注入"
 
+          # 本地密钥备份引擎（下载/菩提护令备份 目录读写 + SAF 选文件）
+          # 'bodhi/local_backup' 通道在 LocalBackup.kt 中实现，缺失时
+          # 表现为「本机不支持（缺少存储通道）」、本地备份与恢复均失败。
+          cp platform/android/LocalBackup.kt \
+             android/app/src/main/kotlin/com/daotuo/bodhi_token/LocalBackup.kt
+          echo "✅ 本地备份引擎已注入"
+
           # 莲花应用图标（flutter create 会生成默认图标，需覆盖）
           for d in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
             mkdir -p "android/app/src/main/res/$d"

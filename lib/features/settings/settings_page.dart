@@ -858,8 +858,11 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _testConnection() async {
     setState(() => _testing = true);
     await _ftp.saveConfig(_currentConfig);
+    // 有加载框，用户清楚知道正在测试（连接最长等 12 秒）
+    _showLoading('正在连接 FTP 服务器…');
     final result = await _ftp.testConnection(_currentConfig);
     if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
     setState(() => _testing = false);
     // 成功/失败必须明确：成功弹窗展示详情，失败红色提示具体原因
     if (result.success) {
@@ -1864,7 +1867,17 @@ class _SettingsPageState extends State<SettingsPage> {
     final result = await _local.backup(password);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    _showSnack(result.message);
+    // 成功/失败必须明确：成功弹窗展示保存位置，失败红色提示具体原因
+    if (result.success) {
+      await _showSuccessDialog('本地备份成功', <String>[
+        '备份文件：${result.fileName ?? ''}',
+        '保存位置：${result.message.replaceFirst("备份成功，已保存到 ", "")}',
+        '已用备份密码 DT 专有强加密，恢复时需输入同一密码',
+        '提示：备份时间：${DateTime.now().toString().substring(0, 16)}',
+      ]);
+    } else {
+      _showErrorSnack(result.message);
+    }
   }
 
   /// 从本机恢复：列出下载目录备份 → 选择 → 输密码 → 导入
@@ -2026,7 +2039,15 @@ class _SettingsPageState extends State<SettingsPage> {
     final result = await _local.restore(id, password, merge: true);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    _showSnack(result.message);
+    // 成功/失败必须明确：成功弹窗展示明细，失败红色提示具体原因
+    if (result.success) {
+      await _showSuccessDialog('本地恢复成功', <String>[
+        '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
+        '已与现有令牌合并（重复自动跳过），请回到令牌列表确认',
+      ]);
+    } else {
+      _showErrorSnack(result.message);
+    }
   }
 
 
@@ -2369,7 +2390,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v5.3.8' : _currentVersion,
+            _currentVersion.isEmpty ? 'v5.3.9' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -2422,7 +2443,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.8" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v5.3.9" : _currentVersion}）')}',
     );
 
     try {
@@ -2459,7 +2480,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.8" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v5.3.9" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,

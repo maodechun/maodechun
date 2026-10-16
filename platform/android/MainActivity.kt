@@ -1,5 +1,7 @@
 package com.daotuo.bodhi_token
 
+import android.content.Intent
+
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 
@@ -11,5 +13,19 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         registerScanEngine(flutterEngine, this)
+        // 本地密钥备份引擎（下载/菩提护令备份 目录读写 + SAF 选文件）
+        LocalBackupEngine.register(flutterEngine, this)
+    }
+
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+    ) {
+        // 本地备份的 SAF 文件选择器结果
+        if (LocalBackupEngine.handleActivityResult(requestCode, resultCode, data)) {
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
     }
 }
