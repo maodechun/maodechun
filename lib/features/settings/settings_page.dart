@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/auto_lock_guard.dart';
@@ -16,6 +17,11 @@ import '../../data/services/update_service.dart';
 import '../../theme/colors.dart';
 import '../../theme/typography.dart';
 import '../../widgets/common.dart';
+import '../account/account_session.dart';
+import '../account/admin_bridge.dart';
+import '../account/admin_page.dart';
+import '../account/login_page.dart';
+import '../account/register_page.dart';
 
 /// S5 设置 · 备份与更新
 ///
@@ -87,11 +93,21 @@ class _SettingsPageState extends State<SettingsPage> {
   // 版本
   String _currentVersion = '';
 
+  // 用户账号会话
+  bool _accountLoaded = false;
+
+  // 超级管理员登录
+  final _adminUserController = TextEditingController();
+  final _adminPassController = TextEditingController();
+  bool _adminObscure = true;
+  bool _adminVerifying = false;
+
   @override
   void initState() {
     super.initState();
     _loadConfig();
     _loadVersion();
+    _loadAccount();
   }
 
   @override
@@ -101,7 +117,15 @@ class _SettingsPageState extends State<SettingsPage> {
     _userController.dispose();
     _passController.dispose();
     _remoteDirController.dispose();
+    _adminUserController.dispose();
+    _adminPassController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadAccount() async {
+    await AccountSession.instance.load();
+    if (!mounted) return;
+    setState(() => _accountLoaded = true);
   }
 
   Future<void> _loadConfig() async {
@@ -149,6 +173,8 @@ class _SettingsPageState extends State<SettingsPage> {
                       padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
                       child: Column(
                         children: [
+                          _buildAccountSection(),
+                          const SizedBox(height: 8),
                           _buildCloudSection(),
                           const SizedBox(height: 8),
                           _buildSecuritySection(),
@@ -177,6 +203,300 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ),
+    );
+  }
+
+  // ── 分组 · 用户账号（注册 / 登录） ─────────────────────
+
+  Widget _buildAccountSection() {
+    final session = AccountSession.instance;
+    return SectionCard(
+      title: '用户账号',
+      children: [
+        if (!_accountLoaded)
+          const SizedBox(
+            height: 44,
+            child: Center(
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.8,
+                  valueColor: AlwaysStoppedAnimation(BodhiColors.gold),
+                ),
+              ),
+            ),
+          )
+        else if (session.loggedIn) ...[
+          SettingRow(
+            label: session.nickname.isNotEmpty
+                ? '${session.nickname}（${_maskPhone(session.phone)}）'
+                : _maskPhone(session.phone),
+            hint: '已登录 · 点击退出登录',
+            trailing: const Icon(
+              Icons.account_circle_outlined,
+              size: 20,
+              color: BodhiColors.gold,
+            ),
+            onTap: _confirmLogout,
+          ),
+        ] else ...[
+          SettingRow(
+            label: '用户注册',
+            hint: '手机号 + 密码，一分钟完成注册',
+            trailing: const Icon(
+              Icons.person_add_alt_1_outlined,
+              size: 18,
+              color: BodhiColors.gold,
+            ),
+            onTap: () => _openAccountPage(const RegisterPage()),
+          ),
+          SettingRow(
+            label: '用户登录',
+            hint: '已有账号，登录后使用云同步能力',
+            showDivider: false,
+            trailing: const Icon(
+              Icons.chevron_right,
+              size: 18,
+              color: BodhiColors.inkFaint,
+            ),
+            onTap: () => _openAccountPage(const LoginPage()),
+          ),
+        ],
+      ],
+    );
+  }
+
+  String _maskPhone(String phone) {
+    if (phone.length >= 7) {
+      return '${phone.substring(0, 3)}****${phone.substring(phone.length - 4)}';
+    }
+    return phone;
+  }
+
+  Future<void> _openAccountPage(Widget page) async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => page),
+    );
+    // 返回后刷新登录状态
+    await AccountSession.instance.load();
+    if (!mounted) return;
+    setState(() => _accountLoaded = true);
+  }
+
+  Future<void> _confirmLogout() async {
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: BodhiColors.cardWhite,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: Text('退出登录', style: BodhiTypography.pageTitle),
+          content: Text(
+            '退出后需要重新登录才能继续使用账号服务，\n'
+            '本机令牌与备份不受影响。',
+            style: BodhiTypography.body.copyWith(
+              color: BodhiColors.inkGray,
+              height: 1.7,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(
+                '取消',
+                style: BodhiTypography.rowLabel.copyWith(
+                  color: BodhiColors.inkGray,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(
+                '退出登录',
+                style: BodhiTypography.rowLabel.copyWith(
+                  color: BodhiColors.cinnabar,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    if (agreed != true || !mounted) return;
+    await AccountSession.instance.clear();
+    setState(() => _accountLoaded = true);
+    _showSnack('已退出登录');
+  }
+
+  // ── 超级管理员登录 ────────────────────────────────────
+
+  Future<void> _showAdminLogin() async {
+    _adminUserController.clear();
+    _adminPassController.clear();
+    _adminObscure = true;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: BodhiColors.cardWhite,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: Row(
+                children: [
+                  const Icon(
+                    Icons.admin_panel_settings_outlined,
+                    size: 20,
+                    color: BodhiColors.gold,
+                  ),
+                  const SizedBox(width: 8),
+                  Text('超级管理员登录', style: BodhiTypography.pageTitle),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const TipBar(
+                    text: '仅限管理员使用。账号与密码由开发方掌握，'
+                        '普通用户无需也无法登录。',
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _adminUserController,
+                    style: BodhiTypography.body,
+                    cursorColor: BodhiColors.gold,
+                    decoration: InputDecoration(
+                      labelText: '管理员账号',
+                      labelStyle: BodhiTypography.caption.copyWith(
+                        color: BodhiColors.inkGray,
+                      ),
+                      filled: true,
+                      fillColor: BodhiColors.fieldBg,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide:
+                            const BorderSide(color: BodhiColors.gold),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _adminPassController,
+                    obscureText: _adminObscure,
+                    style: BodhiTypography.body,
+                    cursorColor: BodhiColors.gold,
+                    decoration: InputDecoration(
+                      labelText: '管理员密码',
+                      labelStyle: BodhiTypography.caption.copyWith(
+                        color: BodhiColors.inkGray,
+                      ),
+                      filled: true,
+                      fillColor: BodhiColors.fieldBg,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide:
+                            const BorderSide(color: BodhiColors.gold),
+                      ),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _adminObscure
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                          size: 18,
+                          color: BodhiColors.inkFaint,
+                        ),
+                        onPressed: () => setDialogState(
+                          () => _adminObscure = !_adminObscure,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: Text(
+                    '取消',
+                    style: BodhiTypography.rowLabel.copyWith(
+                      color: BodhiColors.inkGray,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _adminVerifying
+                      ? null
+                      : () async {
+                          setDialogState(() => _adminVerifying = true);
+                          try {
+                            await AdminBridge.instance.verify(
+                              _adminUserController.text,
+                              _adminPassController.text,
+                            );
+                            if (context.mounted) {
+                              Navigator.pop(context, true);
+                            }
+                          } on AdminAuthException catch (e) {
+                            setDialogState(() => _adminVerifying = false);
+                            _showSnack(e.message);
+                          } catch (_) {
+                            setDialogState(() => _adminVerifying = false);
+                            _showSnack('校验失败，请重试');
+                          }
+                        },
+                  child: _adminVerifying
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation(
+                              BodhiColors.gold,
+                            ),
+                          ),
+                        )
+                      : Text(
+                          '登录',
+                          style: BodhiTypography.rowLabel.copyWith(
+                            color: BodhiColors.gold,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (ok != true || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const AdminPage()),
     );
   }
 
@@ -2717,15 +3037,94 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _checkUpdate() async {
     setState(() => _checkingUpdate = true);
-    final info = await _update.check(silent: false);
+    final result = await _update.checkResult(forManual: true);
     if (!mounted) return;
     setState(() => _checkingUpdate = false);
 
-    if (info == null) {
-      _showSnack('当前已是最新版本');
-      return;
+    switch (result.status) {
+      case UpdateCheckStatus.newer:
+        await showUpdateDialog(result.info!);
+        return;
+      case UpdateCheckStatus.upToDate:
+        _showSimpleDialog(
+          icon: Icons.verified_outlined,
+          title: '已是最新版本',
+          body: '当前版本 $_currentVersion 已是最新版本，无需更新。\n\n'
+              '如需重新安装，可前往官网下载安装包。',
+        );
+        return;
+      case UpdateCheckStatus.error:
+        _showSimpleDialog(
+          icon: Icons.wifi_off_outlined,
+          title: '检查更新失败',
+          body: result.message.isEmpty
+              ? '无法连接更新服务器，请检查网络后重试。'
+              : result.message,
+          actionLabel: '重试',
+          action: _checkUpdate,
+        );
+        return;
     }
-    await showUpdateDialog(info);
+  }
+
+  /// 通用提示弹窗（明确告知型）
+  Future<void> _showSimpleDialog({
+    required IconData icon,
+    required String title,
+    required String body,
+    String? actionLabel,
+    VoidCallback? action,
+  }) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: BodhiColors.cardWhite,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: Row(
+            children: [
+              Icon(icon, size: 20, color: BodhiColors.gold),
+              const SizedBox(width: 8),
+              Text(title, style: BodhiTypography.pageTitle),
+            ],
+          ),
+          content: Text(
+            body,
+            style: BodhiTypography.body.copyWith(
+              color: BodhiColors.inkGray,
+              height: 1.7,
+            ),
+          ),
+          actions: [
+            if (actionLabel != null && action != null)
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  action();
+                },
+                child: Text(
+                  actionLabel,
+                  style: BodhiTypography.rowLabel.copyWith(
+                    color: BodhiColors.gold,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(
+                '知道了',
+                style: BodhiTypography.rowLabel.copyWith(
+                  color: BodhiColors.inkGray,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   /// 更新弹窗（由外部也可调用，如启动时检测到新版本）
@@ -2916,13 +3315,36 @@ class _SettingsPageState extends State<SettingsPage> {
     Navigator.of(context, rootNavigator: true).pop();
 
     if (file == null) {
-      _showSnack('下载失败或校验未通过，请稍后重试');
+      _showSimpleDialog(
+        icon: Icons.error_outline,
+        title: '下载失败',
+        body: '更新包下载失败或 MD5 校验未通过，已自动删除损坏的安装包。\n'
+            '请检查网络后重试，或前往官网手动下载。',
+        actionLabel: '重试',
+        action: () => _startUpdateDownload(info),
+      );
       return;
     }
 
-    // 校验通过后交由系统安装器处理
-    // 实际实现：使用 open_filex 打开 APK
+    // 下载与 MD5 校验通过，调起系统安装器
+    // （Android 8+ 首次安装需允许「安装未知应用」权限，
+    //   open_filex 会自动引导到系统设置页，返回后重试即可）
     _showSnack('下载完成，正在启动安装程序…');
+    final openResult = await OpenFilex.open(file.path);
+    if (!mounted) return;
+    if (openResult.type != ResultType.done) {
+      _showSimpleDialog(
+        icon: Icons.install_mobile_outlined,
+        title: '无法启动安装',
+        body: '原因：${openResult.message}\n\n'
+            '请在系统设置中允许本应用「安装未知应用」权限后重试；'
+            '安装包已保留，重试无需重新下载。',
+        actionLabel: '重新安装',
+        action: () async {
+          await OpenFilex.open(file.path);
+        },
+      );
+    }
   }
 
   // ── 分组 4 · 关于与版权 ──────────────────────────────
@@ -2936,7 +3358,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v6.0.0.3' : _currentVersion,
+            _currentVersion.isEmpty ? 'v6.0.0.4' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -2979,6 +3401,18 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           onTap: widget.onOpenPrivacy,
         ),
+        SettingRow(
+          label: '超级管理员登录',
+          hint: '仅限管理员使用',
+          height: 46,
+          showDivider: false,
+          trailing: const Icon(
+            Icons.admin_panel_settings_outlined,
+            size: 18,
+            color: BodhiColors.inkFaint,
+          ),
+          onTap: _showAdminLogin,
+        ),
       ],
     );
   }
@@ -2989,7 +3423,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.3" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.4" : _currentVersion}）')}',
     );
 
     try {
@@ -3020,7 +3454,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.3" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.4" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,

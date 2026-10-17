@@ -61,6 +61,41 @@ class UpdateInfo {
       .toList();
 }
 
+/// 检查更新结果状态
+enum UpdateCheckStatus {
+  /// 有新版本
+  newer,
+
+  /// 当前已是最新版本
+  upToDate,
+
+  /// 检查失败（网络不可用 / 服务器异常）
+  error,
+}
+
+/// 检查更新结果
+///
+/// 用于手动「检查更新」时明确区分三种情况：
+/// 有新版本 / 已是最新 / 检查失败——
+/// 旧版把「检查失败」也当成「无更新」返回 null，
+/// 用户点了检查更新却只看到"已是最新版本"，容易误解。
+class UpdateCheckResult {
+  final UpdateCheckStatus status;
+  final UpdateInfo? info;
+
+  /// 失败原因（仅 status == error 时有意义）
+  final String message;
+
+  const UpdateCheckResult._(this.status, {this.info, this.message = ''});
+
+  const UpdateCheckResult.newer(UpdateInfo info)
+      : this._(UpdateCheckStatus.newer, info: info);
+  const UpdateCheckResult.upToDate()
+      : this._(UpdateCheckStatus.upToDate, message: '当前已是最新版本');
+  const UpdateCheckResult.error(String msg)
+      : this._(UpdateCheckStatus.error, message: msg);
+}
+
 /// 在线更新服务
 ///
 /// 更新服务器：https://apk.0499.com.cn
@@ -113,9 +148,11 @@ class UpdateService {
   /// 避免静态文件未声明 Content-Type 时被当成字符串而解析失败
   /// （这是之前在线更新一直失效的原因之一）。
   ///
-  /// 返回第一份「比本机新」的清单；
-  /// 若找到一份不比本机新的清单，说明线上就是这个版本，直接返回 null。
-  Future<Map<String, Object?>?> _fetchManifest(
+  /// 返回 (清单数据, 是否确认无更新)：
+  ///   - 找到比本机新的清单 → (map, false)
+  ///   - 找到不比本机新的清单 → (null, true)，说明线上就是这个版本
+  ///   - 所有候选地址都不可用 → (null, false)，由调用方判定为检查失败
+  Future<(Map<String, Object?>?, bool)> _fetchManifest(
     int currentCode,
     String currentName,
   ) async {
@@ -158,16 +195,16 @@ class UpdateService {
         final name = (map['versionName'] as String?) ?? '';
         final code = (map['versionCode'] as num?)?.toInt() ?? 0;
         if (isNewerVersion(name, currentName) || code > currentCode) {
-          return map;
+          return (map, false);
         }
         // 线上最新版并不比本机新：不需要继续往后找了
-        return null;
+        return (null, true);
       } catch (_) {
         // 该地址不存在或不可用，继续尝试下一个
         continue;
       }
     }
-    return null;
+    return (null, false);
   }
 
   /// 版本清单候选地址（按「今天」往前逐日回退查找）
@@ -242,25 +279,34 @@ class UpdateService {
     return false;
   }
 
-  /// 检查更新
+  /// 检查更新（三态结果版）
   ///
-  /// [silent] 静默检查（启动时）：任何异常都返回 null，不打扰用户
-  /// 返回 null 表示无更新或检查失败
-  Future<UpdateInfo?> check({bool silent = true}) async {
+  /// [forManual] 手动检查（用户点了「在线更新」）：
+  ///   网络异常时返回明确错误，让用户知道「检查失败」而不是「无更新」。
+  /// 静默检查（启动时）请用 [check]，任何异常都返回 null，不打扰用户。
+  Future<UpdateCheckResult> checkResult({bool forManual = false}) async {
     try {
       final pkg = await _packageInfo();
       final currentCode = int.tryParse(pkg.buildNumber) ?? 0;
       final currentName = pkg.version;
 
-      final data = await _fetchManifest(currentCode, currentName);
-      if (data == null) return null;
+      final (data, confirmedUpToDate) =
+          await _fetchManifest(currentCode, currentName);
+      if (confirmedUpToDate) return const UpdateCheckResult.upToDate();
+      if (data == null) {
+        return UpdateCheckResult.error(
+          forManual ? '无法连接更新服务器，请检查网络后重试' : '',
+        );
+      }
 
       final info = UpdateInfo.fromJson(data);
 
       // 判定是否需要更新：优先按版本名比较（不受 ABI 偏移影响）
       final newerByName = isNewerVersion(info.versionName, currentName);
       final newerByCode = info.versionCode > currentCode;
-      if (!newerByName && !newerByCode) return null;
+      if (!newerByName && !newerByCode) {
+        return const UpdateCheckResult.upToDate();
+      }
 
       // 计算是否强制（此判断仍按 versionCode 基准值）
       final forced = info.forceUpdate ||
@@ -274,22 +320,37 @@ class UpdateService {
         if (info.md5Armv7.isNotEmpty) md5sum = info.md5Armv7;
       }
 
-      return UpdateInfo(
-        versionName: info.versionName,
-        versionCode: info.versionCode,
-        forceUpdate: forced,
-        minSupportVersion: info.minSupportVersion,
-        downloadUrl: url,
-        releaseNotes: info.releaseNotes,
-        md5: md5sum,
-        publishedAt: info.publishedAt,
-        downloadUrlArmv7: info.downloadUrlArmv7,
-        md5Armv7: info.md5Armv7,
+      return UpdateCheckResult.newer(
+        UpdateInfo(
+          versionName: info.versionName,
+          versionCode: info.versionCode,
+          forceUpdate: forced,
+          minSupportVersion: info.minSupportVersion,
+          downloadUrl: url,
+          releaseNotes: info.releaseNotes,
+          md5: md5sum,
+          publishedAt: info.publishedAt,
+          downloadUrlArmv7: info.downloadUrlArmv7,
+          md5Armv7: info.md5Armv7,
+        ),
       );
-    } catch (_) {
-      // 网络不可用 / 服务器异常：静默返回，不打断用户
-      return null;
+    } catch (e) {
+      // 网络不可用 / 服务器异常
+      return UpdateCheckResult.error(
+        forManual ? '检查更新失败：$e' : '',
+      );
     }
+  }
+
+  /// 检查更新（静默兼容版）
+  ///
+  /// [silent] 静默检查（启动时）：任何异常都返回 null，不打扰用户
+  /// 返回 null 表示无更新或检查失败
+  Future<UpdateInfo?> check({bool silent = true}) async {
+    final result = await checkResult(
+      forManual: !silent,
+    );
+    return result.status == UpdateCheckStatus.newer ? result.info : null;
   }
 
   /// 启动后延迟静默检查（不阻塞进入应用）

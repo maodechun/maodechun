@@ -15,6 +15,8 @@ class MainActivity : FlutterFragmentActivity() {
         registerScanEngine(flutterEngine, this)
         // 本地密钥备份引擎（下载/菩提护令备份 目录读写 + SAF 选文件）
         LocalBackupEngine.register(flutterEngine, this)
+        // 超级管理员本地校验引擎（PBKDF2 哈希比对，明文不进 APK）
+        AdminAuthEngine.register(flutterEngine, this)
     }
 
     override fun onActivityResult(
