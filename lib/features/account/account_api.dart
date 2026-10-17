@@ -60,16 +60,18 @@ class AccountApi {
     return (map['data'] as Map?)?.cast<String, Object?>() ?? {};
   }
 
-  /// 注册（手机号 + 密码）
+  /// 注册（手机号 + 邮箱 + 密码）
   Future<LoginResult> register({
     required String phone,
     required String password,
     String? nickname,
+    String? email,
   }) async {
     final data = await _post('register', {
       'phone': phone,
       'password': password,
       'nickname': nickname ?? '',
+      'email': email ?? '',
     });
     return LoginResult.fromJson(data);
   }
@@ -124,6 +126,24 @@ class AccountApi {
       'search': search,
     }, token: adminToken);
     return AdminUserList.fromJson(data);
+  }
+
+  /// 登录日志 / 操作审计（分页，合并返回）
+  Future<AdminLogList> adminLogs(
+    String adminToken, {
+    int page = 1,
+    int pageSize = 30,
+  }) async {
+    final data = await _post('admin_logs', {
+      'page': page,
+      'page_size': pageSize,
+    }, token: adminToken);
+    return AdminLogList.fromJson(data);
+  }
+
+  /// 管理端操作审计上报（如邮件接口测试）
+  Future<void> adminAudit(String adminToken, String detail) async {
+    await _post('admin_audit', {'detail': detail}, token: adminToken);
   }
 }
 
@@ -212,6 +232,52 @@ class AdminUserList {
         users: ((json['users'] as List?) ?? [])
             .whereType<Map>()
             .map((e) => AdminUserItem.fromJson(e.cast<String, Object?>()))
+            .toList(),
+      );
+}
+
+/// 登录日志 / 审计条目
+class AdminLogItem {
+  final String time;
+  final String account;
+  final String action;
+  final String ip;
+  final String result;
+
+  const AdminLogItem({
+    required this.time,
+    required this.account,
+    required this.action,
+    required this.ip,
+    required this.result,
+  });
+
+  factory AdminLogItem.fromJson(Map<String, Object?> json) => AdminLogItem(
+        time: (json['time'] as String?) ?? '',
+        account: (json['account'] as String?) ?? '',
+        action: (json['action'] as String?) ?? '',
+        ip: (json['ip'] as String?) ?? '',
+        result: (json['result'] as String?) ?? '',
+      );
+}
+
+class AdminLogList {
+  final int total;
+  final int page;
+  final List<AdminLogItem> logs;
+
+  const AdminLogList({
+    required this.total,
+    required this.page,
+    required this.logs,
+  });
+
+  factory AdminLogList.fromJson(Map<String, Object?> json) => AdminLogList(
+        total: (json['total'] as num?)?.toInt() ?? 0,
+        page: (json['page'] as num?)?.toInt() ?? 1,
+        logs: ((json['logs'] as List?) ?? [])
+            .whereType<Map>()
+            .map((e) => AdminLogItem.fromJson(e.cast<String, Object?>()))
             .toList(),
       );
 }

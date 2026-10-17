@@ -8,15 +8,18 @@ import '../repository/token_repository.dart';
 
 /// 七牛云对象存储密钥备份服务
 ///
-/// 「手机号即身份」的免密云备份：
-///   - 首次备份输入 11 位手机号，之后自动静默备份，无需任何密码/验证码
-///   - 备份文件以手机号派生密钥加密（PBKDF2 + AES，与本地/FTP 备份同格式），
+/// 「注册用户名即身份」的免密云备份（v6.0.0.5 起）：
+///   - **必须先注册并登录**才能使用云备份 / 云恢复；
+///     未注册用户在设置页看不到可用入口
+///   - 备份文件以注册用户名（昵称，缺省同手机号）创建：
+///     存储路径 bodhi/cloud/<用户名>.dt
+///   - 备份文件以用户名派生密钥加密（PBKDF2 + AES，与本地/FTP 备份同格式），
 ///     云端不存明文密钥
-///   - 存储路径：bodhi/cloud/<手机号>.dt（DT 专有强加密），同手机号覆盖上传；
-///     兼容读取旧 .btk（自动识别旧格式）
-///   - 换手机：输入同一手机号即可从云端恢复
+///   - 服务端代签时校验用户名必须是已注册账号（见 服务端/user/sign2.php），
+///     未注册身份无法取得上传凭证
+///   - 换手机：注册登录后即可从云端恢复；历史手机号备份（.btk）仍兼容读取
 ///
-/// 上传凭证由服务端代签（https://www.852233.com.cn/qiniu/sign.php），
+/// 上传凭证由服务端代签（https://www.852233.com.cn/user/sign2.php），
 /// 客户端不保存任何 AK/SK；拿到凭证后表单直传七牛，
 /// 依次尝试各区域上传域名直到成功。
 class QiniuBackupService {
@@ -35,47 +38,52 @@ class QiniuBackupService {
     'up-as0.qiniup.com',
   ];
 
-  static const String _phonePrefKey = 'cloud_backup_phone';
+  static const String _identityPrefKey = 'cloud_backup_identity';
 
   /// 恢复失败时的管理员协助提示
   static const String adminHint = '，如仍无法恢复请联系管理员协助找回';
 
-  String? _phone;
+  String? _identity;
 
-  /// 已绑定的手机号（未设置过为 null）
-  Future<String?> getPhone() async {
-    if (_phone != null) return _phone;
+  /// 已绑定的备份身份（注册用户名；未设置过为 null）
+  Future<String?> getIdentity() async {
+    if (_identity != null) return _identity;
     try {
       final prefs = await SharedPreferences.getInstance();
-      _phone = prefs.getString(_phonePrefKey);
+      _identity = prefs.getString(_identityPrefKey);
     } catch (_) {}
-    return _phone;
+    return _identity;
   }
 
-  /// 中国大陆手机号格式校验
-  static bool isValidPhone(String s) => RegExp(r'^1[3-9]\d{9}$').hasMatch(s);
+  /// 注册用户名格式校验：2~32 位，中文/字母/数字/下划线/连字符
+  static bool isValidIdentity(String s) =>
+      RegExp(r'^[\u4e00-\u9fa5A-Za-z0-9_\-]{2,32}$').hasMatch(s);
 
-  /// 保存手机号（本地记录，下次自动使用）
-  Future<void> _savePhone(String phone) async {
-    _phone = phone;
+  /// 保存备份身份（本地记录，下次自动使用）
+  Future<void> _saveIdentity(String identity) async {
+    _identity = identity;
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_phonePrefKey, phone);
+      await prefs.setString(_identityPrefKey, identity);
     } catch (_) {}
   }
 
-  /// 备份 key（新格式 .dt）
-  static String _objectKey(String phone) => 'bodhi/cloud/$phone.dt';
+  /// 备份 key（新格式 .dt，以注册用户名创建）
+  static String _objectKey(String identity) => 'bodhi/cloud/$identity.dt';
 
-  /// 旧格式 key（历史 .btk 备份，恢复时自动回退查找）
-  static String _legacyObjectKey(String phone) => 'bodhi/cloud/$phone.btk';
+  /// 旧格式 key（历史手机号 .btk 备份，恢复时自动回退查找）
+  static String _legacyObjectKey(String identity) => 'bodhi/cloud/$identity.btk';
 
-  /// 代签服务器（SK 只保存在服务端，客户端不含任何密钥）
-  static const String _signUrl = 'https://www.852233.com.cn/qiniu/sign.php';
+  /// 代签服务器（SK 只保存在服务端，客户端不含任何密钥；
+  /// 服务端校验用户名必须是已注册账号）
+  static const String _signUrl = 'https://www.852233.com.cn/user/sign2.php';
   static const String _appSecret = 'bodhi-cloud-v1';
 
   /// 向代签服务器取上传凭证；服务器不可达/异常时返回 null
-  static Future<String?> _resolveUploadToken(String phone, String key) async {
+  static Future<String?> _resolveUploadToken(
+    String identity,
+    String key,
+  ) async {
     try {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 10);
@@ -85,7 +93,8 @@ class QiniuBackupService {
         'x-www-form-urlencoded',
         charset: 'utf-8',
       );
-      final body = 'phone=$phone&secret=$_appSecret';
+      final body = 'identity=${Uri.encodeQueryComponent(identity)}'
+          '&secret=$_appSecret';
       req.headers.contentLength = utf8.encode(body).length;
       req.add(utf8.encode(body));
       final resp = await req.close();
@@ -109,12 +118,12 @@ class QiniuBackupService {
 
   /// 备份到云端
   ///
-  /// [phone] 11 位手机号。文件以手机号加密后覆盖上传。
-  Future<QiniuBackupResult> backup(String phone) async {
-    if (!isValidPhone(phone)) {
+  /// [identity] 注册用户名（登录账号）。文件以用户名加密后覆盖上传。
+  Future<QiniuBackupResult> backup(String identity) async {
+    if (!isValidIdentity(identity)) {
       return const QiniuBackupResult(
         success: false,
-        message: '备份失败：请输入正确的 11 位手机号',
+        message: '备份失败：用户名格式不正确（2-32 位中文/字母/数字）',
       );
     }
     final repo = TokenRepository.instance;
@@ -142,14 +151,15 @@ class QiniuBackupService {
     }
 
     // DT 专有强加密容器（AES-256-GCM + PBKDF2 高轮次 + HMAC 防篡改）
-    final encryptedBytes = DtCipher.encryptToBytes(payload, phone);
-    final key = _objectKey(phone);
-    // 向代签服务器取上传凭证（客户端不含任何密钥）
-    final token = await _resolveUploadToken(phone, key);
+    final encryptedBytes = DtCipher.encryptToBytes(payload, identity);
+    final key = _objectKey(identity);
+    // 向代签服务器取上传凭证（客户端不含任何密钥；
+    // 服务端会校验该用户名必须是已注册账号）
+    final token = await _resolveUploadToken(identity, key);
     if (token == null) {
       return const QiniuBackupResult(
         success: false,
-        message: '备份失败：备份服务暂时不可用，请检查网络后重试',
+        message: '备份失败：备份服务暂时不可用或账号未注册，请检查网络后重试',
       );
     }
 
@@ -159,38 +169,38 @@ class QiniuBackupService {
       return QiniuBackupResult(success: false, message: '备份失败：网络错误（$e）');
     }
 
-    await _savePhone(phone);
+    await _saveIdentity(identity);
     return QiniuBackupResult(
       success: true,
-      message: '云端备份成功（$phone）',
-      phone: phone,
+      message: '云端备份成功（$identity）',
+      phone: identity,
     );
   }
 
-  /// 静默自动备份：已绑定手机号且令牌非空时后台执行，不弹任何提示
+  /// 静默自动备份：已绑定备份身份且令牌非空时后台执行，不弹任何提示
   Future<void> autoBackup() async {
     try {
-      final phone = await getPhone();
-      if (phone == null) return;
+      final identity = await getIdentity();
+      if (identity == null) return;
       if (TokenRepository.instance.isEmpty) return;
-      await backup(phone);
+      await backup(identity);
     } catch (_) {
       // 自动备份失败不打扰用户
     }
   }
 
-  /// 从云端恢复（按手机号下载最新备份并导入）
+  /// 从云端恢复（按备份身份下载最新备份并导入）
   ///
   /// [merge] true 时与现有令牌合并（重复跳过）
-  Future<QiniuBackupResult> restore(String phone, {bool merge = true}) async {
-    if (!isValidPhone(phone)) {
+  Future<QiniuBackupResult> restore(String identity, {bool merge = true}) async {
+    if (!isValidIdentity(identity)) {
       return const QiniuBackupResult(
         success: false,
-        message: '恢复失败：请输入正确的 11 位手机号',
+        message: '恢复失败：用户名格式不正确（2-32 位中文/字母/数字）',
       );
     }
 
-    // 优先取新格式 .dt；云端没有时回退旧 .btk（兼容历史备份）
+    // 优先取新格式 .dt；云端没有时回退旧 .btk（兼容历史手机号备份）
     HttpClient client;
     List<int> raw;
     try {
@@ -210,14 +220,16 @@ class QiniuBackupService {
         return builder.toBytes();
       }
 
-      var fetched = await fetch(_objectKey(phone));
-      fetched ??= await fetch(_legacyObjectKey(phone));
+      var fetched = await fetch(_objectKey(identity));
+      if (fetched == null) {
+        fetched = await fetch(_legacyObjectKey(identity));
+      }
 
       if (fetched == null) {
         client.close();
         return QiniuBackupResult(
           success: false,
-          message: '恢复失败：该手机号在云端没有备份$adminHint',
+          message: '恢复失败：该账号在云端没有备份$adminHint',
         );
       }
       raw = fetched;
@@ -234,7 +246,7 @@ class QiniuBackupService {
     }
 
     // DT 专有强加密解密（自动兼容旧 BODHI1 格式）
-    final plain = DtCipher.decryptAny(raw, phone);
+    final plain = DtCipher.decryptAny(raw, identity);
     if (plain == null) {
       return QiniuBackupResult(
         success: false,
@@ -251,11 +263,11 @@ class QiniuBackupService {
           message: '恢复失败：${result.error ?? "未知错误"}',
         );
       }
-      await _savePhone(phone);
+      await _saveIdentity(identity);
       final msg = result.skipped > 0
           ? '恢复成功：新增 ${result.added} 条，跳过重复 ${result.skipped} 条'
           : '恢复成功：新增 ${result.added} 条';
-      return QiniuBackupResult(success: true, message: msg, phone: phone);
+      return QiniuBackupResult(success: true, message: msg, phone: identity);
     } catch (e) {
       return QiniuBackupResult(success: false, message: '恢复失败：$e');
     }

@@ -50,7 +50,7 @@ class StartupDiag {
   static bool fatal = false;
 
   /// 与 pubspec.yaml version 保持一致（诊断页展示用）
-  static const String appVersion = 'v6.0.0.4';
+  static const String appVersion = 'v6.0.0.5';
 }
 
 Future<void> main() async {
@@ -955,14 +955,15 @@ class _MainNavigatorState extends State<_MainNavigator> {
         // 最后一张（或单张）导入完成：回到令牌列表并汇总结果
         setState(() => _route = _MainRoute.tokens);
         _toast(parts.isNotEmpty ? parts.join('，') : (lastError ?? '绑定失败'));
-        // 绑定成功后自动云备份（已绑定手机号时），结果明确告知用户
+        // 绑定成功后自动云备份（已登录且绑定过备份身份时），结果明确告知用户
         if (added > 0) {
-          final savedPhone = await QiniuBackupService.instance.getPhone();
-          if (savedPhone != null) {
-            final r = await QiniuBackupService.instance.backup(savedPhone);
+          final savedIdentity =
+              await QiniuBackupService.instance.getIdentity();
+          if (savedIdentity != null) {
+            final r = await QiniuBackupService.instance.backup(savedIdentity);
             if (!mounted) return;
             _toast(r.success
-                ? '✅ 云备份成功：令牌已加密上传到云端（$savedPhone）'
+                ? '✅ 云备份成功：令牌已加密上传到云端（$savedIdentity）'
                 : '⚠️ 自动云备份未完成：${r.message}');
           }
         }

@@ -8,6 +8,8 @@ import 'package:dio/dio.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../../core/integrity_bridge.dart';
+
 /// 版本信息
 class UpdateInfo {
   final String versionName;
@@ -192,6 +194,15 @@ class UpdateService {
         if (decoded is! Map) continue;
         final map = decoded.cast<String, Object?>();
 
+        // 服务端签名校验（HMAC-SHA256，密钥内置原生层）：
+        //   - 清单携带 signature → 必须验签通过，否则视为被篡改，拒绝；
+        //   - 清单未携带 signature → 兼容历史版本清单（v6.0.0.4 及更早），
+        //     仍按 HTTPS + MD5 防线处理；新版清单发布起一律带签名。
+        final signature = (map['signature'] as String?) ?? '';
+        if (signature.isNotEmpty && !await verifyManifestSignature(map, signature)) {
+          continue;
+        }
+
         final name = (map['versionName'] as String?) ?? '';
         final code = (map['versionCode'] as num?)?.toInt() ?? 0;
         if (isNewerVersion(name, currentName) || code > currentCode) {
@@ -205,6 +216,42 @@ class UpdateService {
       }
     }
     return (null, false);
+  }
+
+  /// 校验清单签名
+  ///
+  /// 签名 = HMAC-SHA256( 规范化清单, 签名密钥 )，
+  /// 规范化：去掉 signature 字段后，按 key 排序、紧凑分隔符序列化
+  /// （与发布脚本 json.dumps(sort_keys=True, separators=(',',':'),
+  /// ensure_ascii=False) 完全一致）。
+  static Future<bool> verifyManifestSignature(
+    Map<String, Object?> manifest,
+    String signature,
+  ) async {
+    try {
+      final payload = Map<String, Object?>.from(manifest)
+        ..remove('signature');
+      final canonical = jsonEncode(_sortMap(payload));
+      final expect = await IntegrityBridge.instance.hmacSha256(canonical);
+      if (expect == null) return false;
+      return expect.toLowerCase() == signature.toLowerCase();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 递归按 key 排序（保证与发布脚本规范化结果逐字节一致）
+  static Map<String, Object?> _sortMap(Map<String, Object?> map) {
+    final sorted = <String, Object?>{};
+    for (final key in map.keys.toList()..sort()) {
+      final value = map[key];
+      if (value is Map) {
+        sorted[key] = _sortMap(value.cast<String, Object?>());
+      } else {
+        sorted[key] = value;
+      }
+    }
+    return sorted;
   }
 
   /// 版本清单候选地址（按「今天」往前逐日回退查找）

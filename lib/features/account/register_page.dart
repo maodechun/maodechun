@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -6,11 +8,14 @@ import '../../theme/typography.dart';
 import '../../widgets/common.dart';
 import 'account_api.dart';
 import 'account_session.dart';
+import 'email_bridge.dart';
 import 'login_page.dart';
 
 /// 用户注册页
 ///
-/// 手机号 + 密码注册，注册成功即自动登录。
+/// 手机号 + 邮箱 + 密码 + 邮箱验证码注册，注册成功即自动登录。
+/// 验证码由原生 SMTP 引擎（EmailEngine.kt）直接发送，
+/// 凭据内置原生层，Dart 侧拿不到任何账号信息。
 class RegisterPage extends StatefulWidget {
   final VoidCallback? onSuccess;
 
@@ -22,19 +27,45 @@ class RegisterPage extends StatefulWidget {
 
 class _RegisterPageState extends State<RegisterPage> {
   final _phoneController = TextEditingController();
+  final _emailController = TextEditingController();
   final _nickController = TextEditingController();
   final _passController = TextEditingController();
   final _pass2Controller = TextEditingController();
+  final _codeController = TextEditingController();
   bool _obscure = true;
   bool _obscure2 = true;
   bool _busy = false;
 
+  // 验证码（内存保存 10 分钟，不落盘）
+  String _pendingCode = '';
+  DateTime _codeExpiresAt = DateTime.now();
+  bool _sendingCode = false;
+  int _resendCountdown = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _tickResend();
+  }
+
+  void _tickResend() {
+    if (_resendCountdown > 0) {
+      Future.delayed(const Duration(seconds: 1), () {
+        if (!mounted) return;
+        setState(() => _resendCountdown--);
+        _tickResend();
+      });
+    }
+  }
+
   @override
   void dispose() {
     _phoneController.dispose();
+    _emailController.dispose();
     _nickController.dispose();
     _passController.dispose();
     _pass2Controller.dispose();
+    _codeController.dispose();
     super.dispose();
   }
 
@@ -48,16 +79,70 @@ class _RegisterPageState extends State<RegisterPage> {
     return null;
   }
 
+  String? get _emailError {
+    final e = _emailController.text.trim();
+    if (e.isEmpty) return null;
+    final ok = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(e) &&
+        e.length <= 64;
+    if (!ok) return '邮箱格式不正确';
+    return null;
+  }
+
   bool get _canSubmit =>
       !_busy &&
       _phoneError == null &&
+      _emailError == null &&
       _phoneController.text.trim().isNotEmpty &&
+      _emailController.text.trim().isNotEmpty &&
+      _codeController.text.trim().length == 6 &&
       _passController.text.length >= 6 &&
       _passController.text == _pass2Controller.text;
+
+  /// 发送邮箱验证码（原生 SMTP 直发）
+  Future<void> _sendCode() async {
+    final email = _emailController.text.trim();
+    if (_emailError != null || email.isEmpty) {
+      _showSnack('请先填写正确的邮箱地址');
+      return;
+    }
+    if (_sendingCode || _resendCountdown > 0) return;
+    setState(() => _sendingCode = true);
+    try {
+      final code = (100000 + Random().nextInt(900000)).toString();
+      await EmailBridge.instance.sendVerificationCode(
+        to: email,
+        code: code,
+      );
+      _pendingCode = code;
+      _codeExpiresAt = DateTime.now().add(const Duration(minutes: 10));
+      if (!mounted) return;
+      setState(() => _resendCountdown = 60);
+      _tickResend();
+      _showSnack('验证码已发送到 $email，请查收（含垃圾邮件文件夹）');
+    } on EmailException catch (e) {
+      if (!mounted) return;
+      _showSnack('验证码发送失败：${e.message}');
+    } catch (_) {
+      if (!mounted) return;
+      _showSnack('验证码发送失败，请检查网络后重试');
+    } finally {
+      if (mounted) setState(() => _sendingCode = false);
+    }
+  }
 
   Future<void> _submit() async {
     if (!_canSubmit) return;
     _hideKeyboard();
+
+    // 验证码本地校验（10 分钟有效）
+    final input = _codeController.text.trim();
+    if (_pendingCode.isEmpty ||
+        DateTime.now().isAfter(_codeExpiresAt) ||
+        input != _pendingCode) {
+      _showSnack('验证码不正确或已过期，请重新获取');
+      return;
+    }
+
     setState(() => _busy = true);
 
     try {
@@ -65,6 +150,7 @@ class _RegisterPageState extends State<RegisterPage> {
         phone: _phoneController.text.trim(),
         password: _passController.text,
         nickname: _nickController.text.trim(),
+        email: _emailController.text.trim(),
       );
       await AccountSession.instance.save(
         token: result.token,
@@ -134,8 +220,9 @@ class _RegisterPageState extends State<RegisterPage> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const TipBar(
-                      text: '注册只需手机号与密码。密码经服务端加密保存，'
-                          '任何人（包括开发者）都无法看到明文。',
+                      text: '注册需手机号、邮箱与密码。注册后可使用云备份与'
+                          '云恢复（以您的用户名创建备份）。密码经服务端'
+                          '加密保存，任何人（包括开发者）都无法看到明文。',
                     ),
                     const SizedBox(height: 16),
                     _buildCard(
@@ -152,9 +239,51 @@ class _RegisterPageState extends State<RegisterPage> {
                         ),
                         const SizedBox(height: 14),
                         _buildField(
+                          controller: _emailController,
+                          label: '邮箱（必填）',
+                          hint: '接收注册验证码，用于找回账号',
+                          icon: Icons.mail_outline,
+                          keyboardType: TextInputType.emailAddress,
+                          maxLength: 64,
+                          errorText: _emailError,
+                          onChanged: (_) => setState(() {}),
+                        ),
+                        const SizedBox(height: 14),
+                        _buildField(
+                          controller: _codeController,
+                          label: '邮箱验证码',
+                          hint: '6 位数字，10 分钟内有效',
+                          icon: Icons.verified_outlined,
+                          keyboardType: TextInputType.number,
+                          maxLength: 6,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                          ],
+                          onChanged: (_) => setState(() {}),
+                          suffix: TextButton(
+                            onPressed:
+                                (_sendingCode || _resendCountdown > 0)
+                                    ? null
+                                    : _sendCode,
+                            child: Text(
+                              _sendingCode
+                                  ? '发送中…'
+                                  : _resendCountdown > 0
+                                      ? '${_resendCountdown}s 后重发'
+                                      : '获取验证码',
+                              style: BodhiTypography.caption.copyWith(
+                                color: (_sendingCode || _resendCountdown > 0)
+                                    ? BodhiColors.inkFaint
+                                    : BodhiColors.gold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        _buildField(
                           controller: _nickController,
-                          label: '昵称（可选）',
-                          hint: '不填则默认与手机号相同',
+                          label: '用户名（可选）',
+                          hint: '云备份将以用户名创建，不填默认同手机号',
                           icon: Icons.person_outline,
                           maxLength: 16,
                           onChanged: (_) => setState(() {}),
@@ -261,6 +390,7 @@ class _RegisterPageState extends State<RegisterPage> {
     int? maxLength,
     String? errorText,
     Widget? suffix,
+    List<TextInputFormatter>? inputFormatters,
     ValueChanged<String>? onChanged,
     ValueChanged<String>? onSubmitted,
   }) {
@@ -280,9 +410,8 @@ class _RegisterPageState extends State<RegisterPage> {
           obscureText: obscure,
           keyboardType: keyboardType,
           maxLength: maxLength,
-          inputFormatters: [
-            LengthLimitingTextInputFormatter(maxLength ?? 64),
-          ],
+          inputFormatters: inputFormatters ??
+              [LengthLimitingTextInputFormatter(maxLength ?? 64)],
           style: BodhiTypography.body,
           cursorColor: BodhiColors.gold,
           decoration: InputDecoration(

@@ -500,41 +500,95 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  // ── 分组 0 · 云备份与恢复（七牛云，手机号即身份） ─────
+  // ── 分组 0 · 云备份与恢复（七牛云，注册用户名即身份） ─
 
   Widget _buildCloudSection() {
+    final session = AccountSession.instance;
+    final loggedIn = _accountLoaded && session.loggedIn;
+    final identity = session.nickname.isNotEmpty
+        ? session.nickname
+        : session.phone;
     return SectionCard(
       title: '云备份与恢复',
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
       children: [
-        const TipBar(
-          text: '换手机、误删都不怕：输入手机号即可把全部令牌加密备份到云端，'
-              '恢复时输入同一手机号即可找回。无需密码与验证码。',
+        TipBar(
+          text: loggedIn
+              ? '当前账号：$identity。令牌将以账号身份加密备份到云端，'
+                  '换手机登录同一账号即可一键找回。'
+              : '云备份与云恢复需要注册并登录账号后使用（备份文件以'
+                  '您的用户名创建）。请先在上方「用户账号」完成注册或登录。',
         ),
         const SizedBox(height: 6),
         SettingRow(
           label: '云备份',
-          hint: '输入手机号，一键加密备份全部令牌',
-          trailing: const Icon(
+          hint: loggedIn ? '以当前账号身份，一键加密备份全部令牌' : '需要先注册并登录',
+          trailing: Icon(
             Icons.cloud_upload_outlined,
             size: 18,
-            color: BodhiColors.gold,
+            color: loggedIn ? BodhiColors.gold : BodhiColors.inkFaint,
           ),
-          onTap: _cloudBackupFlow,
+          onTap: loggedIn ? _cloudBackupFlow : _promptRegisterFirst,
         ),
         SettingRow(
           label: '云恢复',
-          hint: '输入备份时的手机号，找回云端全部令牌',
+          hint: loggedIn ? '登录同一账号，找回云端全部令牌' : '需要先注册并登录',
           showDivider: false,
-          trailing: const Icon(
+          trailing: Icon(
             Icons.cloud_download_outlined,
             size: 18,
-            color: BodhiColors.gold,
+            color: loggedIn ? BodhiColors.gold : BodhiColors.inkFaint,
           ),
-          onTap: _cloudRestoreFlow,
+          onTap: loggedIn ? _cloudRestoreFlow : _promptRegisterFirst,
         ),
       ],
     );
+  }
+
+  /// 未注册时点云备份/云恢复：引导去注册
+  Future<void> _promptRegisterFirst() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: BodhiColors.cardWhite,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        title: Text('需要账号', style: BodhiTypography.pageTitle),
+        content: Text(
+          '云备份与云恢复仅对注册用户开放。\n'
+          '注册账号后，您的令牌将以用户名加密备份到云端，'
+          '换手机登录同一账号即可找回。',
+          style: BodhiTypography.body.copyWith(
+            color: BodhiColors.inkGray,
+            height: 1.7,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(
+              '暂不',
+              style: BodhiTypography.rowLabel.copyWith(
+                color: BodhiColors.inkGray,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(
+              '去注册 / 登录',
+              style: BodhiTypography.rowLabel.copyWith(
+                color: BodhiColors.gold,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    await _openAccountPage(const RegisterPage());
   }
 
   // ── 分组 1 · 安全与锁定 ──────────────────────────────
@@ -2445,26 +2499,73 @@ class _SettingsPageState extends State<SettingsPage> {
     return (result == null || result.isEmpty) ? null : result;
   }
 
-  // ── 分组 2.5 · 云端备份（七牛云，手机号即身份） ───────
+  // ── 分组 2.5 · 云端备份（七牛云，注册用户名即身份） ───
 
-  /// 备份到云端：每次都要求输入手机号（预填上次绑定的号码）→ 加密备份
+  /// 备份到云端：以当前登录账号的用户名创建备份 → 加密备份
   Future<void> _cloudBackupFlow() async {
-    final saved = await QiniuBackupService.instance.getPhone();
-    final input = await _askCloudPhone(title: '云备份 · 输入手机号', initial: saved);
-    if (input == null || !mounted) return;
+    if (!AccountSession.instance.loggedIn) {
+      _showSnack('请先注册并登录账号');
+      return;
+    }
+    final session = AccountSession.instance;
+    final identity =
+        session.nickname.isNotEmpty ? session.nickname : session.phone;
+    if (!mounted) return;
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: BodhiColors.cardWhite,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        title: Text('云备份', style: BodhiTypography.pageTitle),
+        content: Text(
+          '将以账号「$identity」的身份，把全部 '
+          '${TokenRepository.instance.tokens.length} 个令牌'
+          '加密备份到云端（bodhi/cloud/$identity.dt）。\n\n'
+          '同账号重复备份会覆盖云端旧备份。',
+          style: BodhiTypography.body.copyWith(
+            color: BodhiColors.inkGray,
+            height: 1.7,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(
+              '取消',
+              style: BodhiTypography.rowLabel.copyWith(
+                color: BodhiColors.inkGray,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(
+              '开始备份',
+              style: BodhiTypography.rowLabel.copyWith(
+                color: BodhiColors.gold,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (agreed != true || !mounted) return;
 
     _showLoading('正在加密并上传到云端…');
-    final result = await QiniuBackupService.instance.backup(input);
+    final result = await QiniuBackupService.instance.backup(identity);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
     // 成功/失败必须让用户明确知道：成功弹窗确认，失败红色提示停留更久
     if (result.success) {
       final when = DateTime.now().toString().substring(0, 16);
       await _showSuccessDialog('云备份成功', <String>[
-        '备份手机号：$input',
+        '备份账号：$identity',
         '已备份令牌：${TokenRepository.instance.tokens.length} 个',
-        '令牌已用此手机号加密上传到云端，换手机、误删都能'
-            '在「云恢复」里输入此手机号找回。',
+        '令牌已用此账号身份加密上传到云端，换手机、误删都能'
+            '登录同一账号在「云恢复」里找回。',
         '备份时间：$when',
       ]);
     } else {
@@ -2472,27 +2573,29 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  /// 从云端恢复：输入手机号 → 下载最新备份并导入
+  /// 从云端恢复：以当前登录账号的用户名下载最新备份并导入
   Future<void> _cloudRestoreFlow() =>
       AutoLockGuard.run(() => _cloudRestoreFlowImpl());
 
   Future<void> _cloudRestoreFlowImpl() async {
-    final saved = await QiniuBackupService.instance.getPhone();
-    final input = await _askCloudPhone(
-      title: '从云端恢复',
-      initial: saved,
-    );
-    if (input == null || !mounted) return;
+    if (!AccountSession.instance.loggedIn) {
+      _showSnack('请先注册并登录账号');
+      return;
+    }
+    final session = AccountSession.instance;
+    final identity =
+        session.nickname.isNotEmpty ? session.nickname : session.phone;
+    if (!mounted) return;
 
     _showLoading('正在从云端下载并恢复…');
     final result =
-        await QiniuBackupService.instance.restore(input, merge: true);
+        await QiniuBackupService.instance.restore(identity, merge: true);
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
     // 成功/失败必须让用户明确知道：成功弹窗确认，失败红色提示停留更久
     if (result.success) {
       await _showSuccessDialog('云恢复成功', <String>[
-        '恢复手机号：$input',
+        '恢复账号：$identity',
         '当前令牌总数：${TokenRepository.instance.tokens.length} 个',
         '云端令牌已与手机现有令牌合并（重复的自动跳过），'
             '请回到令牌列表确认。',
@@ -2631,70 +2734,6 @@ class _SettingsPageState extends State<SettingsPage> {
         behavior: SnackBarBehavior.floating,
       ),
     );
-  }
-
-  /// 询问手机号弹窗（11 位大陆手机号，无需验证码）
-  Future<String?> _askCloudPhone({
-    required String title,
-    String? initial,
-  }) {
-    final controller = TextEditingController(text: initial);
-    return showDialog<String>(
-      context: context,
-      builder: (dialogContext) {
-        var error = '';
-        return StatefulBuilder(
-          builder: (dialogContext, setDialogState) => AlertDialog(
-            backgroundColor: BodhiColors.paperLight,
-            title: Text(title, style: BodhiTypography.pageTitle),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '手机号仅用于区分不同用户的备份，'
-                  '不需要验证码与密码，请确保号码真实有效。',
-                  style: BodhiTypography.caption,
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: controller,
-                  autofocus: true,
-                  keyboardType: TextInputType.phone,
-                  maxLength: 11,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: InputDecoration(
-                    hintText: '请输入 11 位手机号',
-                    counterText: '',
-                    errorText: error.isEmpty ? null : error,
-                  ),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('取消'),
-              ),
-              TextButton(
-                onPressed: () {
-                  final v = controller.text.trim();
-                  if (!QiniuBackupService.isValidPhone(v)) {
-                    setDialogState(() => error = '手机号格式不正确');
-                    return;
-                  }
-                  Navigator.of(dialogContext).pop(v);
-                },
-                child: const Text('确定'),
-              ),
-            ],
-          ),
-        );
-      },
-    ).then((value) {
-      controller.dispose();
-      return value;
-    });
   }
 
   // ── 分组 3 · 在线更新与浏览 ──────────────────────────
@@ -3358,7 +3397,7 @@ class _SettingsPageState extends State<SettingsPage> {
           hint: '每次更新都会递增，便于区分新旧安装包',
           height: 46,
           trailing: Text(
-            _currentVersion.isEmpty ? 'v6.0.0.4' : _currentVersion,
+            _currentVersion.isEmpty ? 'v6.0.0.5' : _currentVersion,
             style: BodhiTypography.rowValue.copyWith(
               color: BodhiColors.gold,
               fontWeight: FontWeight.w600,
@@ -3423,7 +3462,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final uri = Uri(
       scheme: 'mailto',
       path: email,
-      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.4" : _currentVersion}）')}',
+      query: 'subject=${Uri.encodeComponent('菩提护令 使用反馈（${_currentVersion.isEmpty ? "v6.0.0.5" : _currentVersion}）')}',
     );
 
     try {
@@ -3454,7 +3493,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Text(
-        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.4" : _currentVersion} · '
+        '菩提护令 ${_currentVersion.isEmpty ? "v6.0.0.5" : _currentVersion} · '
         '道拓日记版权所有 · 本地加密存储',
         style: BodhiTypography.copyright,
         textAlign: TextAlign.center,
